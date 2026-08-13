@@ -257,7 +257,7 @@ async function handleCallback(cq, env) {
       await editMessageText(
         chatId,
         messageId,
-        `🔒 Custom Link adalah fitur Premium (langganan ${escapeHtml(env.PREMIUM_STARS_PRICE)} Stars/bulan).\n\nContoh: anomessbot.t.me?start=bitcoinbim\n\nKetik /upgrade untuk berlangganan pakai Telegram Stars ⭐`,
+        `🔒 Custom Link adalah fitur Premium (langganan ${escapeHtml(env.PREMIUM_STARS_PRICE)} Stars/bulan).\n\nContoh: t.me/${env.BOT_USERNAME}?start=bitcoinbim\n\nKetik /upgrade untuk berlangganan pakai Telegram Stars ⭐`,
         env,
         { reply_markup: backKeyboard() }
       );
@@ -435,7 +435,7 @@ async function sendUpgradeInvoice(chatId, env) {
     body: JSON.stringify({
       chat_id: chatId,
       title: "Anomessbot Premium",
-      description: `Langganan bulanan ${price} Stars: buka fitur link custom (mis. anomessbot.t.me?start=usernamekamu) & fitur premium lainnya. Auto-renew tiap bulan, bisa dibatalkan kapan saja.`,
+      description: `Langganan bulanan ${price} Stars: buka fitur link custom (mis. t.me/${env.BOT_USERNAME}?start=usernamekamu) & fitur premium lainnya. Auto-renew tiap bulan, bisa dibatalkan kapan saja.`,
       payload: "premium_subscription",
       currency: "XTR", // WAJIB "XTR" untuk Telegram Stars
       prices: [{ label: "Premium / bulan", amount: price }], // amount = jumlah Stars, tanpa desimal
