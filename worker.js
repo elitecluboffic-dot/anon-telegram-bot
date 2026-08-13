@@ -1,41 +1,33 @@
 /**
- * Anonymous Message Telegram Bot v7 - Cloudflare Workers
+ * Anonymous Message Telegram Bot v8 - Cloudflare Workers
  * -------------------------------------------------------
- * Tambahan dari v5:
- * - BARU: sistem INBOX. Pesan anonim (teks/gambar) yang masuk ke seseorang TIDAK
- *   langsung dikirim ke chat mereka. Pesan disimpan dulu di KV (`inbox:<userId>`),
- *   dan penerima cuma dapet notifikasi ringan:
- *     "📬 Anda memiliki pesan anonim baru!
- *      💬 Klik untuk menerima 👉 /inbox"
- * - BARU: command /inbox -> mengeluarkan semua pesan yang tertunda di antrean,
- *   mengirimkannya satu per satu ke penerima (format & tombol Balas sama seperti
- *   sebelumnya), LALU mengirim notifikasi "seen" balik ke pengirim asli masing-masing
- *   pesan:
- *     "<Nama Penerima>
- *      <blockquote>isi pesan yang tadi dikirim</blockquote>
+ * TAMBAHAN dari v7 (fokus perubahan versi ini):
+ * - BARU: dukungan MEDIA LENGKAP. Sebelumnya cuma teks & gambar yang bisa
+ *   dikirim/diatur, sekarang mendukung: Gambar, GIF/Foto Bergerak, Stiker,
+ *   Video, Pesan video (video bulat), Musik (audio), Suara (voice note),
+ *   Dokumen, Kontak, dan Lokasi.
+ * - Menu "📎 Media" sekarang generate tombol toggle-nya otomatis dari daftar
+ *   MEDIA_TYPES, jadi tinggal tambah 1 baris di situ kalau suatu saat mau
+ *   nambah jenis media baru lagi.
+ * - CATATAN PENTING: "Foto Bergerak" dan "GIF" DIGABUNG jadi satu setting
+ *   (`animation`). Ini bukan bug - di Telegram Bot API, GIF dan "moving
+ *   photo" itu SAMA PERSIS objeknya (field `message.animation`), gak ada
+ *   cara buat bot membedakan keduanya. Jadi satu toggle ngatur keduanya
+ *   sekaligus, biar gak ada toggle "palsu" yang keliatan beda padahal
+ *   fungsinya identik.
+ * - Profil lama (dibuat sebelum v8) otomatis di-merge ke default settings
+ *   baru saat dibaca (lihat `defaultMediaSettings()` + merge di beberapa
+ *   tempat), jadi gak perlu migrasi data manual di KV.
+ * - Keterbatasan yang perlu diketahui: untuk tipe media yang TIDAK mendukung
+ *   caption di Bot API (stiker, pesan video, kontak, lokasi), bot mengirim
+ *   teks notifikasi "Kamu dapat ... anonim baru!" sebagai PESAN TERPISAH
+ *   sebelum media itu sendiri. Konsekuensinya, tombol "🗑️ Hapus pesan" cuma
+ *   akan menghapus pesan medianya, teks notifikasi terpisah itu tetap ada
+ *   di chat penerima.
  *
- *      💬 Pesan ini ☝️ telah dilihat!"
- *   (pakai parse_mode HTML, blockquote didukung Bot API terbaru)
- * - BARU: helper pushToInbox() & removeFromInbox() buat kelola antrean.
- * - UBAH: "🗑️ Hapus pesan" sekarang menangani DUA kondisi:
- *     1) pesan masih di inbox penerima (belum dibuka /inbox) -> ditarik dari antrean,
- *        penerima gak akan pernah lihat pesan itu sama sekali.
- *     2) pesan sudah terlanjur dikirim (penerima udah buka /inbox) -> pakai
- *        deleteMessage seperti versi lama.
- *   Makanya struktur `last_sent:<userId>` sekarang punya field tambahan `delivered`
- *   (true/false) dan `msgId` (buat kasus belum delivered).
- * - Pesan konfirmasi ke pengirim setelah kirim juga berubah, dari "berhasil dikirim ✅"
- *   jadi "menunggu dilihat oleh penerima ⏳" karena pesan belum benar-benar nyampe
- *   sampai penerima buka /inbox.
- *
- * Struktur data di KV (tambahan/ubahan dari v5):
- *   inbox:<userId> -> JSON array pesan yang tertunda:
- *     [{ msgId, fromUserId, type: "text"|"photo", text, fileId?, createdAt }, ...]
- *   last_sent:<userId> -> JSON { targetUserId, msgId, delivered: false }        (belum dilihat)
- *                       atau JSON { targetUserId, messageId, delivered: true } (sudah dilihat)
- *
- * Sisanya (struktur KV lain, gift, premium, dsb.) TIDAK berubah dari v5, lihat
- * komentar-komentar terkait di bawah untuk detailnya.
+ * Semua fitur v7 (inbox, hadiah anonim/gift asli Telegram, premium & custom
+ * link, statistik, dsb.) TIDAK berubah - lihat komentar-komentar terkait di
+ * bawah untuk detailnya.
  *
  * CATATAN PENTING SOAL TELEGRAM STARS - LANGGANAN vs SEKALI BAYAR:
  * - Currency HARUS "XTR" dan provider_token dikosongkan ("") untuk KEDUANYA (premium & hadiah).
@@ -51,37 +43,23 @@
  */
 
 /**
- * ============ TAMBAHAN v7: RESELLER GIFT ASLI TELEGRAM ============
- * - Katalog GIFT_CATALOG sekarang punya 2 field baru per item:
- *     telegramGiftId : ID gift asli Telegram (string angka). WAJIB diisi manual,
- *                       ambil dari command /listgifts (lihat di bawah). Kalau masih
- *                       null, item itu tetap jalan pakai mode LAMA (fake notif doang).
- *     realPrice      : harga asli gift itu dalam Stars menurut Telegram (juga dari
- *                       /listgifts). Dipakai buat itung profit (price - realPrice).
- * - Command BARU /listgifts (KHUSUS owner, dicek via env.OWNER_USER_ID) -> manggil
- *   getAvailableGifts, nampilin semua gift asli Telegram beserta ID & harga Stars-nya,
- *   biar gampang disalin ke GIFT_CATALOG.
- *   >>> UPDATE (AKTIF): sekarang tiap gift BENERAN dikirim sebagai STIKER dulu
- *       (pakai sendSticker + field `sticker.file_id` dari response getAvailableGifts),
- *       BARU disusul pesan teks caption ID & harga (Bot API sendSticker gak support
- *       caption). Jadi owner bisa LIHAT WUJUD ASLI tiap gift satu-satu, bukan cuma
- *       baca teks emoji hint yang kadang sama/duplikat buat gift yang beda wujud.
- * - Command BARU /giftprofit (KHUSUS owner) -> nampilin total profit dari selisih
- *   harga jual vs harga asli gift, yang kepakai (bukan real-time saldo, cuma akumulasi
- *   pencatatan internal di KV `stats:giftProfit`).
- * - Di handleGiftPaymentSuccess: SETELAH pembayaran custom masuk, kalau item itu punya
- *   telegramGiftId, bot otomatis manggil sendGift() buat kirim gift ASLI ke penerima,
- *   dibayar dari SALDO BOT (bukan dari uang pembeli lagi, itu udah masuk duluan lewat
- *   invoice). Profit = price (yang dibayar user) - realPrice (biaya beli gift asli),
- *   otomatis kecatat. Kalau sendGift gagal (saldo bot kurang / gift abis / ID salah),
- *   fallback ke notifikasi fake seperti versi lama + kirim pesan error ke owner.
+ * ============ RESELLER GIFT ASLI TELEGRAM (dari v7, tidak berubah) ============
+ * - Katalog GIFT_CATALOG punya 2 field per item:
+ *     telegramGiftId : ID gift asli Telegram (string angka), diambil dari /listgifts.
+ *     realPrice      : harga asli gift itu dalam Stars menurut Telegram.
+ * - /listgifts (KHUSUS owner) -> nampilin semua gift asli Telegram + preview stiker
+ *   asli + ID & harga Stars-nya.
+ * - /giftprofit (KHUSUS owner) -> total profit dari selisih harga jual vs harga asli.
+ * - Di handleGiftPaymentSuccess: kalau item punya telegramGiftId, bot kirim gift ASLI
+ *   (dibayar dari saldo bot), profit tercatat otomatis. Kalau gagal, fallback ke
+ *   notifikasi fake + pesan error ke owner.
  * ====================================================================
  */
 
 export default {
   async fetch(request, env) {
     if (request.method !== "POST") {
-      return new Response("Anonymous bot v7 is running.", { status: 200 });
+      return new Response("Anonymous bot v8 is running.", { status: 200 });
     }
 
     let update;
@@ -108,6 +86,48 @@ export default {
     return new Response("OK", { status: 200 });
   },
 };
+
+// ============ KONFIGURASI JENIS MEDIA ============
+
+/**
+ * Daftar semua jenis media (di luar teks, yang selalu aktif) yang bisa
+ * dikirim lewat tautan anonim & diatur nyala/matinya lewat menu Media.
+ * `key`   -> dipakai sebagai nama field di profile.settings & callback_data toggle.
+ * `label` -> teks yang tampil di tombol menu Media.
+ * `noun`  -> kata benda buat notifikasi ("Kamu dapat <noun> anonim baru!").
+ */
+const MEDIA_TYPES = [
+  { key: "photo", label: "🖼️ Gambar", noun: "gambar" },
+  { key: "animation", label: "🎞️ GIF / Foto Bergerak", noun: "GIF/foto bergerak" },
+  { key: "sticker", label: "😊 Stiker", noun: "stiker" },
+  { key: "video", label: "🎥 Video", noun: "video" },
+  { key: "video_note", label: "📹 Pesan video", noun: "pesan video" },
+  { key: "audio", label: "🎵 Musik", noun: "musik" },
+  { key: "voice", label: "🎤 Suara", noun: "pesan suara" },
+  { key: "document", label: "📄 Dokumen", noun: "dokumen" },
+  { key: "contact", label: "📞 Kontak", noun: "kontak" },
+  { key: "location", label: "📍 Lokasi", noun: "lokasi" },
+];
+
+/** Tipe yang didukung Telegram Bot API buat pakai caption (teks nempel di medianya). */
+const CAPTIONABLE_TYPES = new Set(["photo", "animation", "video", "audio", "voice", "document"]);
+
+/** Settings default: semua jenis media aktif (true) untuk profil baru. */
+function defaultMediaSettings() {
+  const s = {};
+  for (const m of MEDIA_TYPES) s[m.key] = true;
+  return s;
+}
+
+/** Gabungkan settings tersimpan dengan default, biar profil lama (pre-v8) otomatis lengkap. */
+function resolveMediaSettings(profile) {
+  return { ...defaultMediaSettings(), ...(profile?.settings || {}) };
+}
+
+function mediaTypeNoun(type) {
+  const found = MEDIA_TYPES.find((m) => m.key === type);
+  return found ? found.noun : "pesan";
+}
 
 // ============ MESSAGE HANDLER ============
 
@@ -191,7 +211,11 @@ async function handleMessage(message, env) {
     }
 
     await env.ANONIM_KV.put(`state:${userId}`, targetUserIdParam, { expirationTtl: 3600 });
-    await sendMessage(chatId, "✍️ Tulis pesan anonim kamu sekarang (boleh teks atau gambar).", env);
+    await sendMessage(
+      chatId,
+      "✍️ Tulis pesan anonim kamu sekarang (boleh teks, gambar, GIF, stiker, video, pesan video, musik, suara, dokumen, kontak, atau lokasi).",
+      env
+    );
     return;
   }
 
@@ -279,7 +303,11 @@ async function handleMessage(message, env) {
       return;
     }
     await env.ANONIM_KV.put(`state:${userId}`, lastRecipient, { expirationTtl: 3600 });
-    await sendMessage(chatId, "✍️ Tulis pesan anonim kamu sekarang (boleh teks atau gambar).", env);
+    await sendMessage(
+      chatId,
+      "✍️ Tulis pesan anonim kamu sekarang (boleh teks, gambar, GIF, stiker, video, pesan video, musik, suara, dokumen, kontak, atau lokasi).",
+      env
+    );
     return;
   }
 
@@ -440,16 +468,16 @@ async function handleMessage(message, env) {
   // ---- Sedang membalas pesan anonim dari user tertentu ----
   const replyTargetId = await env.ANONIM_KV.get(`reply_state:${userId}`);
   if (replyTargetId) {
-    if (message.photo && message.photo.length > 0) {
-      const fileId = message.photo[message.photo.length - 1].file_id;
-      const caption = message.caption ? `\n\n"${message.caption}"` : "";
-      await sendPhoto(Number(replyTargetId), fileId, `💬 Ada balasan anonim!${caption}`, env, replyButton(userId));
-    } else if (text) {
-      await sendMessage(Number(replyTargetId), `💬 Ada balasan anonim:\n\n"${text}"`, env, replyButton(userId));
-    } else {
-      await sendMessage(chatId, "Jenis pesan ini belum didukung untuk balasan. Kirim teks atau gambar ya.", env);
+    const extracted = extractItemFromMessage(message);
+    if (!extracted) {
+      await sendMessage(chatId, "Jenis pesan ini belum didukung untuk balasan.", env);
       return;
     }
+    const prefixText =
+      extracted.type === "text"
+        ? `💬 Ada balasan anonim:\n\n"${extracted.text}"`
+        : `💬 Ada balasan anonim (${mediaTypeNoun(extracted.type)})!`;
+    await sendMediaItem(Number(replyTargetId), extracted, prefixText, env, replyButton(userId));
     await sendMessage(chatId, "Balasan anonim berhasil dikirim ✅", env);
     await env.ANONIM_KV.delete(`reply_state:${userId}`);
     return;
@@ -459,35 +487,29 @@ async function handleMessage(message, env) {
   const targetUserId = await env.ANONIM_KV.get(`state:${userId}`);
   if (targetUserId) {
     const targetProfile = await getProfile(targetUserId, env);
-    const settings = targetProfile?.settings || { photo: true };
+    const settings = resolveMediaSettings(targetProfile);
 
-    let item;
-    if (message.photo && message.photo.length > 0) {
-      if (!settings.photo) {
-        await sendMessage(chatId, "Maaf, penerima menonaktifkan pengiriman gambar lewat link ini.", env);
-        return;
-      }
-      const fileId = message.photo[message.photo.length - 1].file_id;
-      item = {
-        msgId: crypto.randomUUID(),
-        fromUserId: userId,
-        type: "photo",
-        fileId,
-        text: message.caption || "",
-        createdAt: new Date().toISOString(),
-      };
-    } else if (text) {
-      item = {
-        msgId: crypto.randomUUID(),
-        fromUserId: userId,
-        type: "text",
-        text,
-        createdAt: new Date().toISOString(),
-      };
-    } else {
-      await sendMessage(chatId, "Jenis pesan ini belum didukung. Kirim teks atau gambar ya.", env);
+    const extracted = extractItemFromMessage(message);
+    if (!extracted) {
+      await sendMessage(
+        chatId,
+        "Jenis pesan ini belum didukung. Coba kirim teks, gambar, GIF, stiker, video, pesan video, musik, suara, dokumen, kontak, atau lokasi.",
+        env
+      );
       return;
     }
+
+    if (extracted.type !== "text" && settings[extracted.type] === false) {
+      await sendMessage(chatId, `Maaf, penerima menonaktifkan pengiriman ${mediaTypeNoun(extracted.type)} lewat link ini.`, env);
+      return;
+    }
+
+    const item = {
+      msgId: crypto.randomUUID(),
+      fromUserId: userId,
+      createdAt: new Date().toISOString(),
+      ...extracted,
+    };
 
     // simpan ke antrean inbox penerima (BELUM dikirim langsung ke chat mereka)
     await pushToInbox(targetUserId, item, env);
@@ -532,6 +554,112 @@ async function handleMessage(message, env) {
   );
 }
 
+// ============ EKSTRAKSI & PENGIRIMAN MEDIA (generik untuk semua jenis) ============
+
+/**
+ * Baca pesan Telegram masuk (message.photo / .animation / .sticker / dst) dan
+ * ubah jadi objek item internal { type, fileId?, text?, contact?, location? }.
+ * Return null kalau jenis pesannya gak didukung sama sekali (mis. poll, dice).
+ */
+function extractItemFromMessage(message) {
+  const text = message.text || "";
+
+  if (message.photo && message.photo.length > 0) {
+    return { type: "photo", fileId: message.photo[message.photo.length - 1].file_id, text: message.caption || "" };
+  }
+  if (message.animation) {
+    return { type: "animation", fileId: message.animation.file_id, text: message.caption || "" };
+  }
+  if (message.sticker) {
+    return { type: "sticker", fileId: message.sticker.file_id, text: "" };
+  }
+  if (message.video) {
+    return { type: "video", fileId: message.video.file_id, text: message.caption || "" };
+  }
+  if (message.video_note) {
+    return { type: "video_note", fileId: message.video_note.file_id, text: "" };
+  }
+  if (message.audio) {
+    return { type: "audio", fileId: message.audio.file_id, text: message.caption || "" };
+  }
+  if (message.voice) {
+    return { type: "voice", fileId: message.voice.file_id, text: message.caption || "" };
+  }
+  if (message.document) {
+    return { type: "document", fileId: message.document.file_id, text: message.caption || "" };
+  }
+  if (message.contact) {
+    return {
+      type: "contact",
+      text: "",
+      contact: {
+        phone_number: message.contact.phone_number,
+        first_name: message.contact.first_name || "Kontak",
+        last_name: message.contact.last_name || "",
+      },
+    };
+  }
+  if (message.location) {
+    return {
+      type: "location",
+      text: "",
+      location: { latitude: message.location.latitude, longitude: message.location.longitude },
+    };
+  }
+  if (text) {
+    return { type: "text", text };
+  }
+  return null;
+}
+
+/**
+ * Kirim satu item (hasil extractItemFromMessage / disimpan di inbox) ke chatId,
+ * pakai endpoint Telegram yang sesuai jenisnya.
+ * - Untuk tipe yang mendukung caption (foto/gif/video/audio/voice/dokumen):
+ *   prefixText digabung jadi caption di media itu sendiri.
+ * - Untuk tipe yang TIDAK mendukung caption (stiker/pesan video/kontak/lokasi):
+ *   prefixText dikirim dulu sebagai pesan teks terpisah, baru medianya.
+ * - Untuk teks biasa: langsung dikirim sebagai pesan teks (prefixText = isi lengkap).
+ * Return hasil call terakhir (dipakai buat ambil message_id media, kalau ada).
+ */
+async function sendMediaItem(chatId, item, prefixText, env, extra = {}) {
+  if (item.type === "text") {
+    return sendMessage(chatId, prefixText, env, extra);
+  }
+
+  if (CAPTIONABLE_TYPES.has(item.type)) {
+    const caption = prefixText + (item.text ? `\n\n"${item.text}"` : "");
+    switch (item.type) {
+      case "photo":
+        return sendPhoto(chatId, item.fileId, caption, env, extra);
+      case "animation":
+        return sendAnimation(chatId, item.fileId, caption, env, extra);
+      case "video":
+        return sendVideo(chatId, item.fileId, caption, env, extra);
+      case "audio":
+        return sendAudio(chatId, item.fileId, caption, env, extra);
+      case "voice":
+        return sendVoice(chatId, item.fileId, caption, env, extra);
+      case "document":
+        return sendDocument(chatId, item.fileId, caption, env, extra);
+    }
+  }
+
+  // Tipe tanpa dukungan caption: kirim teks notifikasi dulu, baru medianya.
+  await sendMessage(chatId, prefixText, env);
+  switch (item.type) {
+    case "sticker":
+      return sendSticker(chatId, item.fileId, env, extra);
+    case "video_note":
+      return sendVideoNote(chatId, item.fileId, env, extra);
+    case "contact":
+      return sendContact(chatId, item.contact, env, extra);
+    case "location":
+      return sendLocation(chatId, item.location, env, extra);
+  }
+  return null;
+}
+
 // ============ INBOX HANDLER ============
 
 /**
@@ -552,24 +680,12 @@ async function handleInboxCommand(chatId, userId, env) {
   const viewerName = viewerProfile?.name || "Seseorang";
 
   for (const item of inbox) {
-    let sendResult;
-    if (item.type === "photo") {
-      const caption = item.text ? `\n\n"${item.text}"` : "";
-      sendResult = await sendPhoto(
-        chatId,
-        item.fileId,
-        `📩 Kamu dapat gambar anonim baru!${caption}`,
-        env,
-        replyButton(item.fromUserId)
-      );
-    } else {
-      sendResult = await sendMessage(
-        chatId,
-        `📩 Kamu dapat pesan anonim baru:\n\n"${item.text}"`,
-        env,
-        replyButton(item.fromUserId)
-      );
-    }
+    const prefixText =
+      item.type === "text"
+        ? `📩 Kamu dapat pesan anonim baru:\n\n"${item.text}"`
+        : `📩 Kamu dapat ${mediaTypeNoun(item.type)} anonim baru!`;
+
+    const sendResult = await sendMediaItem(chatId, item, prefixText, env, replyButton(item.fromUserId));
 
     // update referensi milik pengirim jadi "delivered", biar "Hapus pesan" versi dia
     // sekarang pakai deleteMessage beneran (bukan tarik dari antrean lagi)
@@ -581,7 +697,7 @@ async function handleInboxCommand(chatId, userId, env) {
     }
 
     // beri tahu pengirim asli bahwa pesannya sudah dilihat
-    const quoted = item.type === "photo" ? item.text || "[gambar]" : item.text;
+    const quoted = item.type === "text" ? item.text : item.text || `[${mediaTypeNoun(item.type)}]`;
     await sendMessage(
       Number(item.fromUserId),
       `<b>${escapeHtml(viewerName)}</b>\n<blockquote>${escapeHtml(quoted)}</blockquote>\n\n💬 Pesan ini ☝️ telah dilihat!`,
@@ -636,6 +752,7 @@ async function handleTentangCommand(chatId, env) {
     `✨ <b>Kenapa banyak yang pakai:</b>\n` +
     `• ⚡ <b>Cepat</b> — pesan sampai dalam hitungan detik, tanpa ribet.\n` +
     `• 🔒 <b>Aman</b> — identitas pengirim gak pernah ditampilkan ke penerima, titik.\n` +
+    `• 📎 <b>Media Lengkap</b> — gambar, GIF, stiker, video, musik, suara, dokumen, kontak, sampai lokasi.\n` +
     `• 📬 <b>Sistem Inbox</b> — kamu yang menentukan kapan sebuah pesan dibuka & "dilihat".\n` +
     `• 🎁 <b>Hadiah Anonim</b> — kirim gift asli Telegram tanpa ketahuan siapa pengirimnya.\n` +
     `• 🔗 <b>Tautan Custom</b> — biar link kamu gampang diingat & keliatan profesional (fitur Premium).\n\n` +
@@ -696,9 +813,9 @@ async function buildOwnerCreditHtml(env) {
  *
  * Sumber tiap angka:
  *   - stats:totalUses     -> di-increment tiap kali handleMessage() ATAU
- *                             handleCallback() diproses (pesan teks/gambar apa pun
- *                             yang dikirim ke bot, DAN tiap klik tombol inline).
- *   - stats:totalMessages -> di-increment CUMA saat pesan anonim (teks/gambar)
+ *                             handleCallback() diproses (pesan apa pun yang
+ *                             dikirim ke bot, DAN tiap klik tombol inline).
+ *   - stats:totalMessages -> di-increment CUMA saat pesan anonim (jenis apa pun)
  *                             berhasil masuk ke antrean inbox seseorang.
  *   - stats:totalUsers    -> di-increment CUMA sekali per user, saat profil
  *                             barunya pertama kali dibuat (getOrCreateProfile).
@@ -790,9 +907,13 @@ async function handleCallback(cq, env) {
     await editMessageText(chatId, messageId, "🧪 Fitur tambahan belum tersedia di versi ini.", env, {
       reply_markup: backKeyboard(),
     });
-  } else if (data === "toggle:photo") {
-    await toggleMediaSetting(userId, "photo", env);
-    await editMediaMenu(chatId, messageId, userId, env);
+  } else if (data.startsWith("toggle:")) {
+    // generik: berlaku buat semua jenis media di MEDIA_TYPES (mis. "toggle:video", "toggle:sticker")
+    const key = data.slice("toggle:".length);
+    if (MEDIA_TYPES.some((m) => m.key === key)) {
+      await toggleMediaSetting(userId, key, env);
+      await editMediaMenu(chatId, messageId, userId, env);
+    }
   } else if (data === "menu:revoke") {
     await revokeLink(userId, env);
     await editSettingsMenu(chatId, messageId, userId, env, "🔄 Tautan lama dicabut, kamu dapat tautan baru!");
@@ -842,7 +963,7 @@ async function handleCallback(cq, env) {
     const senderUserId = data.split(":")[1];
     // userId yang klik tombol ini (cq.from.id) mau balas ke senderUserId
     await env.ANONIM_KV.put(`reply_state:${cq.from.id}`, senderUserId, { expirationTtl: 3600 });
-    await sendMessage(chatId, "✍️ Ketik balasan anonim kamu sekarang (boleh teks atau gambar).", env);
+    await sendMessage(chatId, "✍️ Ketik balasan anonim kamu sekarang (boleh teks atau media apa pun).", env);
   }
 }
 
@@ -944,14 +1065,14 @@ function backKeyboard() {
   return { inline_keyboard: [[{ text: "⬅️ Kembali", callback_data: "menu:back" }]] };
 }
 
+/** Bangun tombol menu Media secara otomatis dari MEDIA_TYPES, plus baris Teks (selalu aktif). */
 function mediaKeyboard(settings) {
-  return {
-    inline_keyboard: [
-      [{ text: `📝 Teks: ✅ (selalu aktif)`, callback_data: "noop" }],
-      [{ text: `🖼️ Gambar: ${settings.photo ? "✅" : "❌"}`, callback_data: "toggle:photo" }],
-      [{ text: "⬅️ Kembali", callback_data: "menu:back" }],
-    ],
-  };
+  const rows = [[{ text: "📝 Teks: ✅ (selalu aktif)", callback_data: "noop" }]];
+  for (const m of MEDIA_TYPES) {
+    rows.push([{ text: `${m.label}: ${settings[m.key] ? "✅" : "❌"}`, callback_data: `toggle:${m.key}` }]);
+  }
+  rows.push([{ text: "⬅️ Kembali", callback_data: "menu:back" }]);
+  return { inline_keyboard: rows };
 }
 
 /**
@@ -993,7 +1114,7 @@ async function editUmumMenu(chatId, messageId, userId, env) {
 
 async function editMediaMenu(chatId, messageId, userId, env) {
   const profile = await getProfile(userId, env);
-  const settings = profile.settings || { photo: true };
+  const settings = resolveMediaSettings(profile);
   const text = "📎 Media\n\nAtur jenis media apa saja yang boleh dikirim orang lain lewat tautanmu.";
   await editMessageText(chatId, messageId, text, env, { reply_markup: mediaKeyboard(settings) });
 }
@@ -1373,7 +1494,7 @@ async function getOrCreateProfile(userId, fromUser, env) {
     premium: false,
     premiumUntil: null,
     premiumChargeId: null,
-    settings: { photo: true },
+    settings: defaultMediaSettings(),
   };
   await env.ANONIM_KV.put(`user:${userId}`, JSON.stringify(profile));
   await env.ANONIM_KV.put(`code:${code}`, String(userId));
@@ -1388,8 +1509,9 @@ async function getOrCreateProfile(userId, fromUser, env) {
 async function toggleMediaSetting(userId, key, env) {
   const profile = await getProfile(userId, env);
   if (!profile) return;
-  profile.settings = profile.settings || {};
-  profile.settings[key] = !profile.settings[key];
+  const settings = resolveMediaSettings(profile);
+  settings[key] = !settings[key];
+  profile.settings = settings;
   await env.ANONIM_KV.put(`user:${userId}`, JSON.stringify(profile));
 }
 
@@ -1456,9 +1578,100 @@ async function sendPhoto(chatId, fileId, caption, env, extra = {}) {
   return res.json().catch(() => null);
 }
 
+/** GIF & "foto bergerak" - keduanya dikirim balik lewat sendAnimation (lihat catatan MEDIA_TYPES). */
+async function sendAnimation(chatId, fileId, caption, env, extra = {}) {
+  const url = `https://api.telegram.org/bot${env.BOT_TOKEN}/sendAnimation`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ chat_id: chatId, animation: fileId, caption, ...extra }),
+  });
+  return res.json().catch(() => null);
+}
+
+async function sendVideo(chatId, fileId, caption, env, extra = {}) {
+  const url = `https://api.telegram.org/bot${env.BOT_TOKEN}/sendVideo`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ chat_id: chatId, video: fileId, caption, ...extra }),
+  });
+  return res.json().catch(() => null);
+}
+
+/** Pesan video bulat (video note) - Bot API tidak mendukung caption untuk tipe ini. */
+async function sendVideoNote(chatId, fileId, env, extra = {}) {
+  const url = `https://api.telegram.org/bot${env.BOT_TOKEN}/sendVideoNote`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ chat_id: chatId, video_note: fileId, ...extra }),
+  });
+  return res.json().catch(() => null);
+}
+
+async function sendAudio(chatId, fileId, caption, env, extra = {}) {
+  const url = `https://api.telegram.org/bot${env.BOT_TOKEN}/sendAudio`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ chat_id: chatId, audio: fileId, caption, ...extra }),
+  });
+  return res.json().catch(() => null);
+}
+
+async function sendVoice(chatId, fileId, caption, env, extra = {}) {
+  const url = `https://api.telegram.org/bot${env.BOT_TOKEN}/sendVoice`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ chat_id: chatId, voice: fileId, caption, ...extra }),
+  });
+  return res.json().catch(() => null);
+}
+
+async function sendDocument(chatId, fileId, caption, env, extra = {}) {
+  const url = `https://api.telegram.org/bot${env.BOT_TOKEN}/sendDocument`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ chat_id: chatId, document: fileId, caption, ...extra }),
+  });
+  return res.json().catch(() => null);
+}
+
+/** contact = { phone_number, first_name, last_name }. Bot API tidak mendukung caption untuk kontak. */
+async function sendContact(chatId, contact, env, extra = {}) {
+  const url = `https://api.telegram.org/bot${env.BOT_TOKEN}/sendContact`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      chat_id: chatId,
+      phone_number: contact.phone_number,
+      first_name: contact.first_name,
+      last_name: contact.last_name || "",
+      ...extra,
+    }),
+  });
+  return res.json().catch(() => null);
+}
+
+/** location = { latitude, longitude }. Bot API tidak mendukung caption untuk lokasi. */
+async function sendLocation(chatId, location, env, extra = {}) {
+  const url = `https://api.telegram.org/bot${env.BOT_TOKEN}/sendLocation`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ chat_id: chatId, latitude: location.latitude, longitude: location.longitude, ...extra }),
+  });
+  return res.json().catch(() => null);
+}
+
 /**
  * Kirim stiker (dipakai buat preview visual gift asli Telegram di /listgifts,
- * lewat file_id dari field `sticker` pada response getAvailableGifts).
+ * dan buat teruskan stiker yang dikirim user lewat link anonim).
+ * Bot API tidak mendukung caption untuk stiker.
  */
 async function sendSticker(chatId, fileId, env, extra = {}) {
   const url = `https://api.telegram.org/bot${env.BOT_TOKEN}/sendSticker`;
