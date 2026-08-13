@@ -219,6 +219,12 @@ async function handleMessage(message, env) {
     return;
   }
 
+  // ---- /tentang -> halaman "Tentang" bot + kredit pembuat (mention otomatis dari ID) ----
+  if (text === "/tentang" || text === "/about") {
+    await handleTentangCommand(chatId, env);
+    return;
+  }
+
   // ---- /upgrade -> kirim invoice langganan Stars ----
   if (text === "/upgrade") {
     await sendUpgradeInvoice(chatId, env);
@@ -596,6 +602,77 @@ async function removeFromInbox(targetUserId, msgId, env) {
   if (newInbox.length === inbox.length) return false;
   await env.ANONIM_KV.put(`inbox:${targetUserId}`, JSON.stringify(newInbox));
   return true;
+}
+
+// ============ HALAMAN "TENTANG" ============
+
+/**
+ * /tentang (alias /about) - Tampilkan deskripsi panjang soal bot + baris kredit
+ * pembuat. Kredit dibangun otomatis dari env.OWNER_USER_ID (angka ID Telegram),
+ * BUKAN username yang diketik manual di kode - jadi walau owner ganti username
+ * Telegram-nya kapan saja, kredit di /tentang tetap otomatis ikut update karena
+ * diambil LIVE lewat getChat tiap kali command ini dipanggil.
+ */
+async function handleTentangCommand(chatId, env) {
+  const creditLine = await buildOwnerCreditHtml(env);
+
+  const text =
+    `🕶️ <b>Tentang Bot</b>\n\n` +
+    `Di balik setiap tautan yang kamu bagikan, ada ruang aman untuk jujur tanpa harus menunjukkan wajah.\n\n` +
+    `Bot ini dibangun buat satu alasan sederhana: kadang kata-kata paling jujur cuma bisa keluar kalau identitas gak jadi taruhan. Entah itu pujian yang malu-malu, kritik yang selama ini dipendam, curahan hati tengah malam, atau sekadar "hai" dari seseorang yang gak berani bilang langsung — semua bisa tersampaikan lewat sini, tanpa jejak, tanpa rasa takut dihakimi.\n\n` +
+    `✨ <b>Kenapa banyak yang pakai:</b>\n` +
+    `• ⚡ <b>Cepat</b> — pesan sampai dalam hitungan detik, tanpa ribet.\n` +
+    `• 🔒 <b>Aman</b> — identitas pengirim gak pernah ditampilkan ke penerima, titik.\n` +
+    `• 📬 <b>Sistem Inbox</b> — kamu yang menentukan kapan sebuah pesan dibuka & "dilihat".\n` +
+    `• 🎁 <b>Hadiah Anonim</b> — kirim gift asli Telegram tanpa ketahuan siapa pengirimnya.\n` +
+    `• 🔗 <b>Tautan Custom</b> — biar link kamu gampang diingat & keliatan profesional (fitur Premium).\n\n` +
+    `Semua dibangun ringan & cepat di atas Cloudflare Workers, jadi kapan pun link kamu dibuka, bot selalu siap sedia.\n\n` +
+    `Ketik /start buat dapetin tautan pribadimu sendiri, atau /mylink buat kelola pengaturan.\n\n` +
+    `🛠️ <b>Dibangun oleh:</b> ${creditLine}`;
+
+  await sendMessage(chatId, text, env, { parse_mode: "HTML" });
+}
+
+/**
+ * Ambil info owner (nama & username kalau ada) langsung dari Telegram lewat getChat,
+ * berdasarkan env.OWNER_USER_ID (angka ID, BUKAN username yang diketik manual).
+ * - Kalau owner PUNYA username publik -> ditampilkan sebagai "@username" biasa
+ *   (Telegram otomatis bikin ini clickable, gak perlu HTML tambahan).
+ * - Kalau owner TIDAK PUNYA username publik -> dibungkus sebagai mention HTML pakai
+ *   tg://user?id=<ID>, jadi teksnya tetap tampil bisa-diklik & membuka chat owner,
+ *   walau dia gak punya username publik.
+ * - Kalau OWNER_USER_ID belum di-set, atau fetch gagal (mis. bot belum pernah
+ *   "kenal" chat dengan user itu) -> fallback ke teks/link generik "Owner Bot".
+ *
+ * CATATAN: getChat cuma bisa berhasil kalau bot pernah punya histori chat dengan
+ * user itu (biasanya otomatis terpenuhi karena owner sendiri yang menjalankan
+ * command-command khusus owner seperti /listgifts).
+ */
+async function buildOwnerCreditHtml(env) {
+  if (!isOwnerConfigured(env)) return "Owner Bot";
+
+  try {
+    const url = `https://api.telegram.org/bot${env.BOT_TOKEN}/getChat`;
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: Number(env.OWNER_USER_ID) }),
+    });
+    const data = await res.json().catch(() => ({ ok: false }));
+
+    if (data.ok && data.result) {
+      const u = data.result;
+      if (u.username) {
+        return `@${escapeHtml(u.username)}`;
+      }
+      const displayName = escapeHtml(u.first_name || "Owner Bot");
+      return `<a href="tg://user?id=${env.OWNER_USER_ID}">${displayName}</a>`;
+    }
+  } catch (e) {
+    // diamkan, fallback di bawah
+  }
+
+  return `<a href="tg://user?id=${env.OWNER_USER_ID}">Owner Bot</a>`;
 }
 
 // ============ CALLBACK (TOMBOL INLINE) HANDLER ============
