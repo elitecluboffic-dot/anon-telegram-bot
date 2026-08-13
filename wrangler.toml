@@ -1,5 +1,5 @@
 name = "anon-telegram-bot"
-main = "src/worker.js"
+main = "worker.js"
 compatibility_date = "2024-11-01"
 
 # Binding KV Namespace buat simpan data user (kode unik -> user_id, dsb)
