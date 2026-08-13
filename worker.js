@@ -243,10 +243,6 @@ async function handleCallback(cq, env) {
   } else if (data === "menu:revoke") {
     await revokeLink(userId, env);
     await editSettingsMenu(chatId, messageId, userId, env, "🔄 Tautan lama dicabut, kamu dapat tautan baru!");
-  } else if (data === "menu:share") {
-    const profile = await getProfile(userId, env);
-    const link = buildLink(profile.code, env);
-    await sendMessage(chatId, `Bagikan tautan ini ke teman-temanmu:\n${link}`, env);
   } else if (data === "menu:copy") {
     const profile = await getProfile(userId, env);
     const link = buildLink(profile.code, env);
@@ -285,13 +281,16 @@ function mainMenuKeyboard() {
   return { keyboard: [[{ text: "Tautan pribadi saya" }]], resize_keyboard: true };
 }
 
-function settingsInlineKeyboard() {
+function settingsInlineKeyboard(link) {
+  const shareUrl = `https://t.me/share/url?url=${encodeURIComponent(link)}&text=${encodeURIComponent(
+    "Kirim aku pesan anonim di sini 👇"
+  )}`;
   return {
     inline_keyboard: [
       [{ text: "⚙️ Umum", callback_data: "menu:umum" }, { text: "📎 Media", callback_data: "menu:media" }],
       [{ text: "🧪 Fitur", callback_data: "menu:fitur" }, { text: "🔗 Custom Link", callback_data: "menu:customlink" }],
       [{ text: "🔄 Cabut Tautan", callback_data: "menu:revoke" }],
-      [{ text: "📤 Bagikan", callback_data: "menu:share" }, { text: "📋 Salin Tautan", callback_data: "menu:copy" }],
+      [{ text: "📤 Bagikan", url: shareUrl }, { text: "📋 Salin Tautan", callback_data: "menu:copy" }],
     ],
   };
 }
@@ -327,14 +326,14 @@ async function sendSettingsMenu(chatId, userId, env) {
   const profile = await getOrCreateProfile(userId, null, env);
   const link = buildLink(profile.code, env);
   const text = formatStatsText(profile, link);
-  await sendMessage(chatId, text, env, { reply_markup: settingsInlineKeyboard() });
+  await sendMessage(chatId, text, env, { reply_markup: settingsInlineKeyboard(link) });
 }
 
 async function editSettingsMenu(chatId, messageId, userId, env, prefix = "") {
   const profile = await getProfile(userId, env);
   const link = buildLink(profile.code, env);
   const text = (prefix ? prefix + "\n\n" : "") + formatStatsText(profile, link);
-  await editMessageText(chatId, messageId, text, env, { reply_markup: settingsInlineKeyboard() });
+  await editMessageText(chatId, messageId, text, env, { reply_markup: settingsInlineKeyboard(link) });
 }
 
 async function editUmumMenu(chatId, messageId, userId, env) {
