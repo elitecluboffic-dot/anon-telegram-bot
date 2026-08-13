@@ -61,11 +61,11 @@
  * - Command BARU /listgifts (KHUSUS owner, dicek via env.OWNER_USER_ID) -> manggil
  *   getAvailableGifts, nampilin semua gift asli Telegram beserta ID & harga Stars-nya,
  *   biar gampang disalin ke GIFT_CATALOG.
- *   >>> UPDATE: sekarang tiap gift juga dikirim sebagai STIKER (pakai sendSticker +
- *       field `sticker.file_id` dari response getAvailableGifts), jadi owner bisa
- *       LIHAT WUJUD ASLI gift-nya (animasi/video sticker), bukan cuma baca ID & harga
- *       dalam bentuk teks doang. Sticker dikirim dulu, lalu pesan teks info ID/harga
- *       nyusul di bawahnya (Bot API sendSticker gak support caption).
+ *   >>> UPDATE (AKTIF): sekarang tiap gift BENERAN dikirim sebagai STIKER dulu
+ *       (pakai sendSticker + field `sticker.file_id` dari response getAvailableGifts),
+ *       BARU disusul pesan teks caption ID & harga (Bot API sendSticker gak support
+ *       caption). Jadi owner bisa LIHAT WUJUD ASLI tiap gift satu-satu, bukan cuma
+ *       baca teks emoji hint yang kadang sama/duplikat buat gift yang beda wujud.
  * - Command BARU /giftprofit (KHUSUS owner) -> nampilin total profit dari selisih
  *   harga jual vs harga asli gift, yang kepakai (bukan real-time saldo, cuma akumulasi
  *   pencatatan internal di KV `stats:giftProfit`).
@@ -850,18 +850,21 @@ function isPremiumActive(profile) {
 /**
  * Katalog hadiah statis. Harga dalam Stars (XTR), sesuai contoh referensi.
  * Tambah/ubah item di sini kalau mau custom katalognya.
+ *
+ * CATATAN: hasil /listgifts nunjukin ada 2 gift dengan emoji hint 🎂 sama-sama
+ * 50 Stars (ID 6046178578163303744 dan ID 5170144170496491616) — padahal salah
+ * satunya sebenarnya "Boneka Beruang Tentara" (bukan kue), cuma field
+ * sticker.emoji-nya kebetulan sama. Item "bear" di bawah pakai salah satu ID itu
+ * sebagai PLACEHOLDER SEMENTARA — WAJIB dicek ulang manual pakai /listgifts versi
+ * sticker (lihat handleListGifts) buat mastiin ID mana yang beneran beruang,
+ * baru swap ID-nya kalau ternyata kebalik sama item "cake" di bawah.
  */
 const GIFT_CATALOG = [
-  // telegramGiftId & realPrice diisi dari hasil /listgifts (dicocokkan lewat emoji
-  // bawaan tiap gift). price = harga jual ke pembeli (sesuai daftar harga terbaru).
-  //
-  // Catatan: ada 2 gift dengan emoji 🎂 dari /listgifts (ID 6046178578163303744 dan
-  // ID 5170144170496491616, sama-sama 50 Stars). Yang dipakai di sini cuma yang
-  // pertama; ID keduanya belum dipetakan ke item manapun.
   { id: "heart", emoji: "💝", label: "Hati & Pita", price: 45, telegramGiftId: "5170145012310081615", realPrice: 15 },
   { id: "box", emoji: "🎁", label: "Kado", price: 75, telegramGiftId: "5170250947678437525", realPrice: 25 },
   { id: "rose", emoji: "🌹", label: "Mawar", price: 75, telegramGiftId: "5168103777563050263", realPrice: 25 },
   { id: "cake", emoji: "🎂", label: "Kue Ulang Tahun", price: 150, telegramGiftId: "6046178578163303744", realPrice: 50 },
+  { id: "bear", emoji: "🧸", label: "Boneka Beruang Tentara", price: 200, telegramGiftId: "5170144170496491616", realPrice: 50 },
   { id: "bouquet", emoji: "💐", label: "Buket Bunga", price: 150, telegramGiftId: "5170314324215857265", realPrice: 50 },
   { id: "rocket", emoji: "🚀", label: "Roket", price: 150, telegramGiftId: "5170564780938756245", realPrice: 50 },
   { id: "champagne", emoji: "🍾", label: "Sampanye", price: 150, telegramGiftId: "6028601630662853006", realPrice: 50 },
@@ -1133,10 +1136,11 @@ async function sendRealGift(targetUserId, telegramGiftId, text, env) {
  * Command /listgifts (khusus owner): ambil daftar gift asli Telegram yang lagi
  * tersedia beserta ID & harga Stars-nya, biar gampang disalin ke GIFT_CATALOG.
  *
- * UPDATE: sekarang tiap gift juga dikirim sebagai STIKER (pakai file_id dari
- * field `sticker` di response getAvailableGifts), jadi owner bisa LIHAT WUJUD
- * ASLI gift-nya, bukan cuma baca ID & harga sebagai teks. Sticker dikirim
- * duluan, disusul pesan teks info ID/harga (sendSticker gak support caption).
+ * SEKARANG BENERAN kirim tiap gift sebagai STIKER dulu (pakai file_id dari field
+ * `sticker` di response getAvailableGifts) SEBELUM caption teks ID/harga nyusul.
+ * Ini penting terutama buat gift-gift yang emoji hint-nya sama/duplikat (misal ada
+ * 2 gift sama-sama muncul sebagai 🎂 padahal beda wujud) — dengan liat stiker
+ * aslinya, owner bisa mastiin ID mana yang cocok buat item apa di GIFT_CATALOG.
  */
 async function handleListGifts(chatId, env) {
   const url = `https://api.telegram.org/bot${env.BOT_TOKEN}/getAvailableGifts`;
@@ -1152,26 +1156,22 @@ async function handleListGifts(chatId, env) {
 
   for (const g of data.result.gifts) {
     const limited = g.total_count ? ` (limited: ${g.remaining_count ?? "?"}/${g.total_count})` : "";
-
-    // CATATAN: sticker gift Telegram bertipe "custom_emoji". Custom emoji cuma bisa
-    // dirender jadi animasi aslinya kalau akun PENERIMA (yang buka chat ini) punya
-    // Telegram Premium — kalau tidak, Telegram cuma nampilin fallback placeholder,
-    // sama persis buat semua gift (makanya kalau kamu udah coba versi sebelumnya,
-    // semuanya keliatan sama kayak 🎁).
-    //
-    // Solusi yang lebih reliable: tiap gift ternyata udah punya field "emoji" bawaan
-    // (emoji Unicode biasa, bukan custom emoji) di dalam objek sticker-nya, yang
-    // mewakili wujud gift itu (contoh: 🎂 buat kue ulang tahun, 🌹 buat mawar, dst).
-    // Ini dipakai langsung sebagai identitas visual di caption, tanpa perlu Premium.
     const emojiHint = g.sticker?.emoji || "🎁";
-    const caption = `${emojiHint} ID: ${g.id} — ${g.star_count} Stars${limited}`;
 
+    // Kirim stiker dulu (kalau file_id ada) biar owner LIHAT WUJUD ASLI gift-nya,
+    // karena emoji hint di atas kadang sama walau gift-nya beda (lihat catatan
+    // di GIFT_CATALOG soal 2 gift 🎂 yang sebenarnya beda wujud).
+    if (g.sticker?.file_id) {
+      await sendSticker(chatId, g.sticker.file_id, env);
+    }
+
+    const caption = `${emojiHint} ID: ${g.id} — ${g.star_count} Stars${limited}`;
     await sendMessage(chatId, caption, env);
   }
 
   await sendMessage(
     chatId,
-    "Salin ID & harga Stars yang kamu mau ke GIFT_CATALOG (field telegramGiftId & realPrice), cocokkan sama emoji/label yang paling mirip ya.",
+    "Salin ID & harga Stars yang kamu mau ke GIFT_CATALOG (field telegramGiftId & realPrice), cocokkan sama STIKER yang muncul di atas (bukan cuma emoji hint di captionnya, karena bisa duplikat/gak akurat) ya.",
     env
   );
 }
@@ -1277,8 +1277,8 @@ async function sendPhoto(chatId, fileId, caption, env, extra = {}) {
 }
 
 /**
- * BARU (v7 update): kirim stiker (dipakai buat preview visual gift asli Telegram
- * di /listgifts, lewat file_id dari field `sticker` pada response getAvailableGifts).
+ * Kirim stiker (dipakai buat preview visual gift asli Telegram di /listgifts,
+ * lewat file_id dari field `sticker` pada response getAvailableGifts).
  */
 async function sendSticker(chatId, fileId, env, extra = {}) {
   const url = `https://api.telegram.org/bot${env.BOT_TOKEN}/sendSticker`;
