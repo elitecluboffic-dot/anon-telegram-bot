@@ -1,41 +1,41 @@
 /**
- * Anonymous Message Telegram Bot v5 - Cloudflare Workers
+ * Anonymous Message Telegram Bot v6 - Cloudflare Workers
  * -------------------------------------------------------
- * Tambahan dari v4:
- * - BARU: tombol "📤 Bagikan" di menu sekarang pakai INLINE MODE Telegram
- *   (switch_inline_query), bukan share-url biasa. Tap tombol -> muncul "Pilih Obrolan"
- *   (chat picker bawaan Telegram) -> pilih chat -> bot ngirim pesan otomatis ke chat
- *   itu (nampil "via @NamaBot") lengkap dengan tombol "Kirim pesan anonim" &
- *   "Kirim hadiah anonim".
- * - BARU: deep link "?start=gift_<code>" -> langsung masuk ke alur pilih hadiah
- *   ke pemilik kode itu, TANPA perlu kirim pesan teks dulu.
- * - PENTING: supaya update inline_query masuk ke webhook, inline mode bot HARUS
- *   diaktifkan dulu lewat @BotFather -> /setinline (isi placeholder bebas, mis.
- *   "Kirim pesan/hadiah anonim..."). Kalau belum diaktifkan, tombol Bagikan tetap
- *   muncul tapi Telegram gak akan minta update ke bot kamu.
+ * Tambahan dari v5:
+ * - BARU: sistem INBOX. Pesan anonim (teks/gambar) yang masuk ke seseorang TIDAK
+ *   langsung dikirim ke chat mereka. Pesan disimpan dulu di KV (`inbox:<userId>`),
+ *   dan penerima cuma dapet notifikasi ringan:
+ *     "📬 Anda memiliki pesan anonim baru!
+ *      💬 Klik untuk menerima 👉 /inbox"
+ * - BARU: command /inbox -> mengeluarkan semua pesan yang tertunda di antrean,
+ *   mengirimkannya satu per satu ke penerima (format & tombol Balas sama seperti
+ *   sebelumnya), LALU mengirim notifikasi "seen" balik ke pengirim asli masing-masing
+ *   pesan:
+ *     "<Nama Penerima>
+ *      <blockquote>isi pesan yang tadi dikirim</blockquote>
  *
- * Tambahan dari v3 (tetap berlaku):
- * - Premium tetap LANGGANAN BULANAN 50 Stars/bulan (subscription_period, tidak berubah)
- * - Fitur "Kirim hadiah anonim" -> user bisa beli hadiah (emoji + harga Stars)
- *   dan kirim ke orang TERAKHIR yang mereka kirimi pesan/hadiah, lengkap dengan pesan
- *   opsional (maks 128 karakter), dibayar pakai Telegram Stars SEKALI BAYAR (bukan subscription).
- * - Menu setelah pesan terkirim -> "Kirim pesan lainnya", "Hapus pesan",
- *   "Kirim hadiah anonim" (reply keyboard, sesuai referensi screenshot).
- * - /cancelpremium tetap ada, tidak berubah dari v3.
+ *      💬 Pesan ini ☝️ telah dilihat!"
+ *   (pakai parse_mode HTML, blockquote didukung Bot API terbaru)
+ * - BARU: helper pushToInbox() & removeFromInbox() buat kelola antrean.
+ * - UBAH: "🗑️ Hapus pesan" sekarang menangani DUA kondisi:
+ *     1) pesan masih di inbox penerima (belum dibuka /inbox) -> ditarik dari antrean,
+ *        penerima gak akan pernah lihat pesan itu sama sekali.
+ *     2) pesan sudah terlanjur dikirim (penerima udah buka /inbox) -> pakai
+ *        deleteMessage seperti versi lama.
+ *   Makanya struktur `last_sent:<userId>` sekarang punya field tambahan `delivered`
+ *   (true/false) dan `msgId` (buat kasus belum delivered).
+ * - Pesan konfirmasi ke pengirim setelah kirim juga berubah, dari "berhasil dikirim ✅"
+ *   jadi "menunggu dilihat oleh penerima ⏳" karena pesan belum benar-benar nyampe
+ *   sampai penerima buka /inbox.
  *
- * Struktur data di KV (tambahan field dari v3):
- *   user:<userId> -> {
- *     code, name, createdAt, receivedCount, receivedGifts,
- *     premium, premiumUntil, premiumChargeId,
- *     settings: { photo: true }
- *   }
- *   awaiting_code:<userId>          -> "1"  (nunggu input kode custom, TTL 5 menit)
- *   last_recipient:<userId>        -> targetUserId (orang TERAKHIR yang dikirimi pesan/hadiah)
- *   last_sent:<userId>             -> JSON { targetUserId, messageId } (buat fitur "Hapus pesan")
- *   awaiting_gift_pick:<userId>    -> "1"  (lagi milih hadiah dari katalog, TTL 5 menit)
- *   awaiting_gift_message:<userId> -> "1"  (lagi isi pesan opsional buat hadiah, TTL 15 menit)
- *   pending_gift:<userId>          -> JSON { giftId, targetUserId, message } (TTL 15 menit,
- *                                      dibaca lagi pas successful_payment masuk)
+ * Struktur data di KV (tambahan/ubahan dari v5):
+ *   inbox:<userId> -> JSON array pesan yang tertunda:
+ *     [{ msgId, fromUserId, type: "text"|"photo", text, fileId?, createdAt }, ...]
+ *   last_sent:<userId> -> JSON { targetUserId, msgId, delivered: false }        (belum dilihat)
+ *                       atau JSON { targetUserId, messageId, delivered: true } (sudah dilihat)
+ *
+ * Sisanya (struktur KV lain, gift, premium, dsb.) TIDAK berubah dari v5, lihat
+ * komentar-komentar terkait di bawah untuk detailnya.
  *
  * CATATAN PENTING SOAL TELEGRAM STARS - LANGGANAN vs SEKALI BAYAR:
  * - Currency HARUS "XTR" dan provider_token dikosongkan ("") untuk KEDUANYA (premium & hadiah).
@@ -53,7 +53,7 @@
 export default {
   async fetch(request, env) {
     if (request.method !== "POST") {
-      return new Response("Anonymous bot v4 is running.", { status: 200 });
+      return new Response("Anonymous bot v6 is running.", { status: 200 });
     }
 
     let update;
@@ -163,6 +163,12 @@ async function handleMessage(message, env) {
     return;
   }
 
+  // ---- /inbox -> keluarkan semua pesan anonim yang masih tertunda di antrean ----
+  if (text === "/inbox") {
+    await handleInboxCommand(chatId, userId, env);
+    return;
+  }
+
   // ---- /upgrade -> kirim invoice langganan Stars ----
   if (text === "/upgrade") {
     await sendUpgradeInvoice(chatId, env);
@@ -219,6 +225,22 @@ async function handleMessage(message, env) {
       return;
     }
     const lastSent = JSON.parse(raw);
+
+    // Kasus 1: pesan masih ngendon di inbox penerima, belum sempat dibuka /inbox
+    if (!lastSent.delivered) {
+      const removed = await removeFromInbox(lastSent.targetUserId, lastSent.msgId, env);
+      await sendMessage(
+        chatId,
+        removed
+          ? "🗑️ Pesan berhasil ditarik sebelum sempat dilihat penerima."
+          : "Pesan sudah keburu dilihat penerima atau sudah dihapus duluan.",
+        env
+      );
+      if (removed) await env.ANONIM_KV.delete(`last_sent:${userId}`);
+      return;
+    }
+
+    // Kasus 2: pesan sudah terkirim ke chat penerima (sudah dibuka lewat /inbox)
     const ok = await deleteMessage(Number(lastSent.targetUserId), lastSent.messageId, env);
     await sendMessage(
       chatId,
@@ -372,50 +394,63 @@ async function handleMessage(message, env) {
   if (targetUserId) {
     const targetProfile = await getProfile(targetUserId, env);
     const settings = targetProfile?.settings || { photo: true };
-    let sendResult = null;
 
+    let item;
     if (message.photo && message.photo.length > 0) {
       if (!settings.photo) {
         await sendMessage(chatId, "Maaf, penerima menonaktifkan pengiriman gambar lewat link ini.", env);
         return;
       }
       const fileId = message.photo[message.photo.length - 1].file_id;
-      const caption = message.caption ? `\n\n"${message.caption}"` : "";
-      sendResult = await sendPhoto(
-        Number(targetUserId),
+      item = {
+        msgId: crypto.randomUUID(),
+        fromUserId: userId,
+        type: "photo",
         fileId,
-        `📩 Kamu dapat gambar anonim baru!${caption}`,
-        env,
-        replyButton(userId)
-      );
+        text: message.caption || "",
+        createdAt: new Date().toISOString(),
+      };
     } else if (text) {
-      sendResult = await sendMessage(
-        Number(targetUserId),
-        `📩 Kamu dapat pesan anonim baru:\n\n"${text}"`,
-        env,
-        replyButton(userId)
-      );
+      item = {
+        msgId: crypto.randomUUID(),
+        fromUserId: userId,
+        type: "text",
+        text,
+        createdAt: new Date().toISOString(),
+      };
     } else {
       await sendMessage(chatId, "Jenis pesan ini belum didukung. Kirim teks atau gambar ya.", env);
       return;
     }
+
+    // simpan ke antrean inbox penerima (BELUM dikirim langsung ke chat mereka)
+    await pushToInbox(targetUserId, item, env);
 
     await incrementReceivedCount(targetUserId, env);
 
     // simpan riwayat penerima terakhir (dipakai buat "Kirim pesan lainnya" & "Kirim hadiah anonim")
     await env.ANONIM_KV.put(`last_recipient:${userId}`, String(targetUserId));
 
-    // simpan message_id yang baru dikirim (dipakai buat "Hapus pesan")
-    if (sendResult?.result?.message_id) {
-      await env.ANONIM_KV.put(
-        `last_sent:${userId}`,
-        JSON.stringify({ targetUserId: String(targetUserId), messageId: sendResult.result.message_id })
-      );
-    }
+    // simpan referensi pesan yang barusan dikirim (dipakai buat "Hapus pesan"),
+    // delivered: false karena masih di inbox, belum benar-benar nyampe
+    await env.ANONIM_KV.put(
+      `last_sent:${userId}`,
+      JSON.stringify({ targetUserId: String(targetUserId), msgId: item.msgId, delivered: false })
+    );
 
-    await sendMessage(chatId, "Pesan berhasil dikirim secara anonim ✅\n\nMau ngapain lagi?", env, {
-      reply_markup: postSendKeyboard(),
-    });
+    // beri tahu penerima bahwa ada pesan anonim baru menunggu di /inbox
+    await sendMessage(
+      Number(targetUserId),
+      `📬 Anda memiliki pesan anonim baru!\n\n💬 Klik untuk menerima 👉 /inbox`,
+      env
+    );
+
+    await sendMessage(
+      chatId,
+      "📨 Pesan berhasil dikirim, menunggu dilihat oleh penerima ⏳\n\nMau ngapain lagi?",
+      env,
+      { reply_markup: postSendKeyboard() }
+    );
     await env.ANONIM_KV.delete(`state:${userId}`);
     return;
   }
@@ -426,6 +461,91 @@ async function handleMessage(message, env) {
     "Ketik /start untuk dapat link pesan anonim kamu, atau buka link dari orang lain untuk kirim pesan anonim ke mereka.",
     env
   );
+}
+
+// ============ INBOX HANDLER ============
+
+/**
+ * Dipanggil saat user ketik /inbox. Mengeluarkan semua pesan anonim yang tertunda
+ * (tersimpan di KV inbox:<userId>), mengirimkannya satu per satu ke chat user ini,
+ * lalu mengirim notifikasi "seen" balik ke masing-masing pengirim asli.
+ */
+async function handleInboxCommand(chatId, userId, env) {
+  const raw = await env.ANONIM_KV.get(`inbox:${userId}`);
+  const inbox = raw ? JSON.parse(raw) : [];
+
+  if (inbox.length === 0) {
+    await sendMessage(chatId, "📭 Tidak ada pesan baru di inbox kamu.", env);
+    return;
+  }
+
+  const viewerProfile = await getProfile(userId, env);
+  const viewerName = viewerProfile?.name || "Seseorang";
+
+  for (const item of inbox) {
+    let sendResult;
+    if (item.type === "photo") {
+      const caption = item.text ? `\n\n"${item.text}"` : "";
+      sendResult = await sendPhoto(
+        chatId,
+        item.fileId,
+        `📩 Kamu dapat gambar anonim baru!${caption}`,
+        env,
+        replyButton(item.fromUserId)
+      );
+    } else {
+      sendResult = await sendMessage(
+        chatId,
+        `📩 Kamu dapat pesan anonim baru:\n\n"${item.text}"`,
+        env,
+        replyButton(item.fromUserId)
+      );
+    }
+
+    // update referensi milik pengirim jadi "delivered", biar "Hapus pesan" versi dia
+    // sekarang pakai deleteMessage beneran (bukan tarik dari antrean lagi)
+    if (sendResult?.result?.message_id) {
+      await env.ANONIM_KV.put(
+        `last_sent:${item.fromUserId}`,
+        JSON.stringify({ targetUserId: String(userId), messageId: sendResult.result.message_id, delivered: true })
+      );
+    }
+
+    // beri tahu pengirim asli bahwa pesannya sudah dilihat
+    const quoted = item.type === "photo" ? item.text || "[gambar]" : item.text;
+    await sendMessage(
+      Number(item.fromUserId),
+      `<b>${escapeHtml(viewerName)}</b>\n<blockquote>${escapeHtml(quoted)}</blockquote>\n\n💬 Pesan ini ☝️ telah dilihat!`,
+      env,
+      { parse_mode: "HTML" }
+    );
+  }
+
+  await env.ANONIM_KV.delete(`inbox:${userId}`);
+}
+
+/** Tambahkan satu pesan anonim ke antrean inbox milik targetUserId. */
+async function pushToInbox(targetUserId, item, env) {
+  const raw = await env.ANONIM_KV.get(`inbox:${targetUserId}`);
+  const inbox = raw ? JSON.parse(raw) : [];
+  inbox.push(item);
+  await env.ANONIM_KV.put(`inbox:${targetUserId}`, JSON.stringify(inbox));
+}
+
+/**
+ * Tarik satu pesan dari antrean inbox milik targetUserId berdasarkan msgId
+ * (dipakai fitur "Hapus pesan" sebelum pesan sempat dilihat).
+ * Return true kalau berhasil ketemu & dihapus, false kalau tidak ketemu
+ * (kemungkinan sudah keburu dilihat / dihapus duluan).
+ */
+async function removeFromInbox(targetUserId, msgId, env) {
+  const raw = await env.ANONIM_KV.get(`inbox:${targetUserId}`);
+  if (!raw) return false;
+  const inbox = JSON.parse(raw);
+  const newInbox = inbox.filter((m) => m.msgId !== msgId);
+  if (newInbox.length === inbox.length) return false;
+  await env.ANONIM_KV.put(`inbox:${targetUserId}`, JSON.stringify(newInbox));
+  return true;
 }
 
 // ============ CALLBACK (TOMBOL INLINE) HANDLER ============
