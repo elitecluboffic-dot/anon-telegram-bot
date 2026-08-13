@@ -1,5 +1,5 @@
 /**
- * Anonymous Message Telegram Bot v6 - Cloudflare Workers
+ * Anonymous Message Telegram Bot v7 - Cloudflare Workers
  * -------------------------------------------------------
  * Tambahan dari v5:
  * - BARU: sistem INBOX. Pesan anonim (teks/gambar) yang masuk ke seseorang TIDAK
@@ -61,6 +61,11 @@
  * - Command BARU /listgifts (KHUSUS owner, dicek via env.OWNER_USER_ID) -> manggil
  *   getAvailableGifts, nampilin semua gift asli Telegram beserta ID & harga Stars-nya,
  *   biar gampang disalin ke GIFT_CATALOG.
+ *   >>> UPDATE: sekarang tiap gift juga dikirim sebagai STIKER (pakai sendSticker +
+ *       field `sticker.file_id` dari response getAvailableGifts), jadi owner bisa
+ *       LIHAT WUJUD ASLI gift-nya (animasi/video sticker), bukan cuma baca ID & harga
+ *       dalam bentuk teks doang. Sticker dikirim dulu, lalu pesan teks info ID/harga
+ *       nyusul di bawahnya (Bot API sendSticker gak support caption).
  * - Command BARU /giftprofit (KHUSUS owner) -> nampilin total profit dari selisih
  *   harga jual vs harga asli gift, yang kepakai (bukan real-time saldo, cuma akumulasi
  *   pencatatan internal di KV `stats:giftProfit`).
@@ -1124,6 +1129,11 @@ async function sendRealGift(targetUserId, telegramGiftId, text, env) {
 /**
  * Command /listgifts (khusus owner): ambil daftar gift asli Telegram yang lagi
  * tersedia beserta ID & harga Stars-nya, biar gampang disalin ke GIFT_CATALOG.
+ *
+ * UPDATE: sekarang tiap gift juga dikirim sebagai STIKER (pakai file_id dari
+ * field `sticker` di response getAvailableGifts), jadi owner bisa LIHAT WUJUD
+ * ASLI gift-nya, bukan cuma baca ID & harga sebagai teks. Sticker dikirim
+ * duluan, disusul pesan teks info ID/harga (sendSticker gak support caption).
  */
 async function handleListGifts(chatId, env) {
   const url = `https://api.telegram.org/bot${env.BOT_TOKEN}/getAvailableGifts`;
@@ -1135,17 +1145,20 @@ async function handleListGifts(chatId, env) {
     return;
   }
 
-  const lines = data.result.gifts.map((g) => {
-    const limited = g.total_count ? ` (limited: ${g.remaining_count ?? "?"}/${g.total_count})` : "";
-    return `ID: ${g.id} — ${g.star_count} Stars${limited}`;
-  });
+  await sendMessage(chatId, `🎁 Ditemukan ${data.result.gifts.length} gift. Mengirim satu per satu beserta stikernya...`, env);
 
-  // Kirim per-chunk biar gak kena limit panjang pesan Telegram (4096 karakter)
-  const chunkSize = 30;
-  for (let i = 0; i < lines.length; i += chunkSize) {
-    const chunk = lines.slice(i, i + chunkSize).join("\n");
-    await sendMessage(chatId, `🎁 Daftar gift asli Telegram:\n\n${chunk}`, env);
+  for (const g of data.result.gifts) {
+    const limited = g.total_count ? ` (limited: ${g.remaining_count ?? "?"}/${g.total_count})` : "";
+    const caption = `ID: ${g.id} — ${g.star_count} Stars${limited}`;
+
+    // Kirim wujud visual gift-nya dulu (kalau field sticker ada)
+    if (g.sticker?.file_id) {
+      await sendSticker(chatId, g.sticker.file_id, env);
+    }
+    // Baru info ID & harga sebagai teks (sendSticker gak support caption)
+    await sendMessage(chatId, caption, env);
   }
+
   await sendMessage(
     chatId,
     "Salin ID & harga Stars yang kamu mau ke GIFT_CATALOG (field telegramGiftId & realPrice), cocokkan sama emoji/label yang paling mirip ya.",
@@ -1249,6 +1262,20 @@ async function sendPhoto(chatId, fileId, caption, env, extra = {}) {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ chat_id: chatId, photo: fileId, caption, ...extra }),
+  });
+  return res.json().catch(() => null);
+}
+
+/**
+ * BARU (v7 update): kirim stiker (dipakai buat preview visual gift asli Telegram
+ * di /listgifts, lewat file_id dari field `sticker` pada response getAvailableGifts).
+ */
+async function sendSticker(chatId, fileId, env, extra = {}) {
+  const url = `https://api.telegram.org/bot${env.BOT_TOKEN}/sendSticker`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ chat_id: chatId, sticker: fileId, ...extra }),
   });
   return res.json().catch(() => null);
 }
