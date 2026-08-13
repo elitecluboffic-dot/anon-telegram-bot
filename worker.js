@@ -116,6 +116,10 @@ async function handleMessage(message, env) {
   const userId = message.from.id;
   const text = message.text || "";
 
+  // catat "penggunaan" bot (dipakai buat /statistik) + pastikan launch date sudah tercatat
+  await incrementCounter(`stats:totalUses`, env);
+  await ensureLaunchDate(env);
+
   // ---- Pembayaran Stars sukses (premium bulanan ATAU pembelian hadiah anonim) ----
   if (message.successful_payment) {
     const sp = message.successful_payment;
@@ -222,6 +226,12 @@ async function handleMessage(message, env) {
   // ---- /tentang -> halaman "Tentang" bot + kredit pembuat (mention otomatis dari ID) ----
   if (text === "/tentang" || text === "/about") {
     await handleTentangCommand(chatId, env);
+    return;
+  }
+
+  // ---- /statistik -> statistik bot REAL, diambil dari counter di KV ----
+  if (text === "/statistik" || text === "/stats") {
+    await handleStatistikCommand(chatId, env);
     return;
   }
 
@@ -482,6 +492,9 @@ async function handleMessage(message, env) {
     // simpan ke antrean inbox penerima (BELUM dikirim langsung ke chat mereka)
     await pushToInbox(targetUserId, item, env);
 
+    // catat "jumlah pesan" global (dipakai buat /statistik)
+    await incrementCounter(`stats:totalMessages`, env);
+
     await incrementReceivedCount(targetUserId, env);
 
     // simpan riwayat penerima terakhir (dipakai buat "Kirim pesan lainnya" & "Kirim hadiah anonim")
@@ -625,8 +638,8 @@ async function handleTentangCommand(chatId, env) {
     `• 🔒 <b>Aman</b> — identitas pengirim gak pernah ditampilkan ke penerima, titik.\n` +
     `• 📬 <b>Sistem Inbox</b> — kamu yang menentukan kapan sebuah pesan dibuka & "dilihat".\n` +
     `• 🎁 <b>Hadiah Anonim</b> — kirim gift asli Telegram tanpa ketahuan siapa pengirimnya.\n` +
-    `• 🔗 <b>Tautan Custom</b> — biar link kamu gampang diingat & keliatan keren (fitur Premium).\n\n` +
-    `Semua dibangun ringan & super cepat, jadi kapan pun link kamu dibuka, bot selalu siap sedia.\n\n` +
+    `• 🔗 <b>Tautan Custom</b> — biar link kamu gampang diingat & keliatan profesional (fitur Premium).\n\n` +
+    `Semua dibangun ringan & cepat di atas Cloudflare Workers, jadi kapan pun link kamu dibuka, bot selalu siap sedia.\n\n` +
     `Ketik /start buat dapetin tautan pribadimu sendiri, atau /mylink buat kelola pengaturan.\n\n` +
     `🛠️ <b>Dibangun oleh:</b> ${creditLine}`;
 
@@ -675,6 +688,85 @@ async function buildOwnerCreditHtml(env) {
   return `<a href="tg://user?id=${env.OWNER_USER_ID}">Owner Bot</a>`;
 }
 
+// ============ STATISTIK BOT (REAL, BUKAN DUMMY) ============
+
+/**
+ * /statistik (alias /stats) - Tampilkan statistik penggunaan bot yang REAL,
+ * diambil dari counter yang tersimpan di KV (bukan angka dummy/hardcode).
+ *
+ * Sumber tiap angka:
+ *   - stats:totalUses     -> di-increment tiap kali handleMessage() ATAU
+ *                             handleCallback() diproses (pesan teks/gambar apa pun
+ *                             yang dikirim ke bot, DAN tiap klik tombol inline).
+ *   - stats:totalMessages -> di-increment CUMA saat pesan anonim (teks/gambar)
+ *                             berhasil masuk ke antrean inbox seseorang.
+ *   - stats:totalUsers    -> di-increment CUMA sekali per user, saat profil
+ *                             barunya pertama kali dibuat (getOrCreateProfile).
+ *   - stats:launchDate    -> tanggal ISO pertama kali fitur statistik ini aktif
+ *                             (di-set otomatis sekali lewat ensureLaunchDate,
+ *                             gak perlu diisi manual). UpTime dihitung dari sini.
+ */
+async function handleStatistikCommand(chatId, env) {
+  const [usesRaw, messagesRaw, usersRaw, launchRaw] = await Promise.all([
+    env.ANONIM_KV.get(`stats:totalUses`),
+    env.ANONIM_KV.get(`stats:totalMessages`),
+    env.ANONIM_KV.get(`stats:totalUsers`),
+    ensureLaunchDate(env),
+  ]);
+
+  const uses = usesRaw ? Number(usesRaw) : 0;
+  const messagesCount = messagesRaw ? Number(messagesRaw) : 0;
+  const usersCount = usersRaw ? Number(usersRaw) : 0;
+
+  const launchDate = new Date(launchRaw);
+  const daysSince = Math.max(0, Math.floor((Date.now() - launchDate.getTime()) / (1000 * 60 * 60 * 24)));
+
+  const text =
+    `📊 <b>Bots Statistik</b>\n\n` +
+    `📥 Number of uses: ${formatNumber(uses)}\n` +
+    `💌 Number of messages: ${formatNumber(messagesCount)}\n\n` +
+    `👤 Number of users: ${formatNumber(usersCount)}\n\n` +
+    `💬 These data are from ${formatDateID(launchDate)} until now.\n(UpTime : ${daysSince} Days)`;
+
+  await sendMessage(chatId, text, env, { parse_mode: "HTML" });
+}
+
+/** Nambahin 1 (atau `amount`) ke counter angka di KV, dipakai buat berbagai statistik. */
+async function incrementCounter(key, env, amount = 1) {
+  const raw = await env.ANONIM_KV.get(key);
+  const current = raw ? Number(raw) : 0;
+  await env.ANONIM_KV.put(key, String(current + amount));
+}
+
+/**
+ * Pastikan `stats:launchDate` sudah tercatat di KV. Kalau belum pernah di-set
+ * (mis. baru pertama kali fitur statistik ini aktif), catat waktu SEKARANG
+ * sebagai titik mulai penghitungan UpTime, lalu return nilai itu.
+ * Kalau sudah pernah di-set sebelumnya, cukup return nilai yang sudah ada
+ * (idempotent - gak akan ke-reset ulang tiap request).
+ */
+async function ensureLaunchDate(env) {
+  const existing = await env.ANONIM_KV.get(`stats:launchDate`);
+  if (existing) return existing;
+  const now = new Date().toISOString();
+  await env.ANONIM_KV.put(`stats:launchDate`, now);
+  return now;
+}
+
+/** Format angka pakai pemisah ribuan koma, mis. 2868943 -> "2,868,943". */
+function formatNumber(n) {
+  return n.toLocaleString("en-US");
+}
+
+/** Format tanggal ke gaya "22 Januari 2023". */
+function formatDateID(date) {
+  const bulan = [
+    "Januari", "Februari", "Maret", "April", "Mei", "Juni",
+    "Juli", "Agustus", "September", "Oktober", "November", "Desember",
+  ];
+  return `${date.getDate()} ${bulan[date.getMonth()]} ${date.getFullYear()}`;
+}
+
 // ============ CALLBACK (TOMBOL INLINE) HANDLER ============
 
 async function handleCallback(cq, env) {
@@ -682,6 +774,9 @@ async function handleCallback(cq, env) {
   const messageId = cq.message.message_id;
   const userId = cq.from.id;
   const data = cq.data;
+
+  // klik tombol inline juga dihitung sebagai "penggunaan" bot
+  await incrementCounter(`stats:totalUses`, env);
 
   await answerCallbackQuery(cq.id, env);
 
@@ -1282,6 +1377,11 @@ async function getOrCreateProfile(userId, fromUser, env) {
   };
   await env.ANONIM_KV.put(`user:${userId}`, JSON.stringify(profile));
   await env.ANONIM_KV.put(`code:${code}`, String(userId));
+
+  // catat "jumlah pengguna" global (dipakai buat /statistik) - cuma dihitung SEKALI
+  // per user, karena blok ini cuma dieksekusi saat profil BARU dibuat.
+  await incrementCounter(`stats:totalUsers`, env);
+
   return profile;
 }
 
