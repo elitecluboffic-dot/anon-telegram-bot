@@ -1158,20 +1158,35 @@ async function handleListGifts(chatId, env) {
     const limited = g.total_count ? ` (limited: ${g.remaining_count ?? "?"}/${g.total_count})` : "";
     const caption = `ID: ${g.id} — ${g.star_count} Stars${limited}`;
 
-    // Kirim wujud visual gift-nya dulu (kalau field sticker ada)
-    if (g.sticker?.file_id) {
+    // PENTING: sticker gift Telegram ternyata bertipe "custom_emoji", BUKAN stiker
+    // biasa. Custom emoji gak bisa dikirim lewat sendSticker sama sekali (Telegram
+    // akan tolak dengan error "can't send emoji stickers in messages"). Cara yang
+    // benar: kirim sebagai pesan teks berisi satu emoji placeholder, dengan
+    // "entities" bertipe custom_emoji yang nunjuk ke custom_emoji_id-nya. Telegram
+    // bakal render itu jadi wujud animasi/gambar aslinya di pesan tersebut.
+    if (g.sticker?.type === "custom_emoji" && g.sticker.custom_emoji_id) {
+      const emojiResult = await sendCustomEmoji(chatId, g.sticker.custom_emoji_id, env);
+      if (!emojiResult?.ok) {
+        await sendMessage(
+          chatId,
+          `⚠️ Gagal kirim custom emoji gift ID ${g.id}. Error: ${emojiResult?.description || "(tidak ada deskripsi)"}`,
+          env
+        );
+      }
+    } else if (g.sticker?.file_id) {
+      // fallback buat kasus sticker biasa (bukan custom_emoji), kalau suatu saat ada
       const stickerResult = await sendSticker(chatId, g.sticker.file_id, env);
       if (!stickerResult?.ok) {
         await sendMessage(
           chatId,
-          `⚠️ Gagal kirim stiker gift ID ${g.id}. Error dari Telegram: ${stickerResult?.description || "(tidak ada deskripsi, cek koneksi/response)"}`,
+          `⚠️ Gagal kirim stiker gift ID ${g.id}. Error dari Telegram: ${stickerResult?.description || "(tidak ada deskripsi)"}`,
           env
         );
       }
     } else {
-      await sendMessage(chatId, `⚠️ Gift ID ${g.id} tidak punya field "sticker.file_id" di response API.`, env);
+      await sendMessage(chatId, `⚠️ Gift ID ${g.id} tidak punya field sticker yang bisa dipreview.`, env);
     }
-    // Baru info ID & harga sebagai teks (sendSticker gak support caption)
+    // Baru info ID & harga sebagai teks
     await sendMessage(chatId, caption, env);
   }
 
@@ -1292,6 +1307,32 @@ async function sendSticker(chatId, fileId, env, extra = {}) {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ chat_id: chatId, sticker: fileId, ...extra }),
+  });
+  return res.json().catch(() => null);
+}
+
+/**
+ * BARU: kirim custom emoji (dipakai buat preview visual gift asli Telegram di
+ * /listgifts). Gift sticker Telegram bertipe "custom_emoji", bukan stiker biasa,
+ * jadi TIDAK BISA dikirim lewat sendSticker. Cara yang benar: kirim pesan teks
+ * berisi satu emoji placeholder, lalu tempelkan "entities" bertipe custom_emoji
+ * yang nunjuk ke custom_emoji_id-nya. Telegram akan render wujud animasi aslinya
+ * di posisi placeholder itu.
+ *
+ * Placeholder yang dipakai ("🎁") sengaja dipilih karena di UTF-16 panjangnya
+ * pas 2 code unit (surrogate pair), jadi offset:0, length:2 selalu akurat.
+ */
+async function sendCustomEmoji(chatId, customEmojiId, env) {
+  const placeholder = "🎁";
+  const url = `https://api.telegram.org/bot${env.BOT_TOKEN}/sendMessage`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      chat_id: chatId,
+      text: placeholder,
+      entities: [{ type: "custom_emoji", offset: 0, length: 2, custom_emoji_id: customEmojiId }],
+    }),
   });
   return res.json().catch(() => null);
 }
