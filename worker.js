@@ -50,10 +50,33 @@
  *   Settings > My Subscriptions, ATAU bot bisa cancel via editUserStarSubscription (/cancelpremium).
  */
 
+/**
+ * ============ TAMBAHAN v7: RESELLER GIFT ASLI TELEGRAM ============
+ * - Katalog GIFT_CATALOG sekarang punya 2 field baru per item:
+ *     telegramGiftId : ID gift asli Telegram (string angka). WAJIB diisi manual,
+ *                       ambil dari command /listgifts (lihat di bawah). Kalau masih
+ *                       null, item itu tetap jalan pakai mode LAMA (fake notif doang).
+ *     realPrice      : harga asli gift itu dalam Stars menurut Telegram (juga dari
+ *                       /listgifts). Dipakai buat itung profit (price - realPrice).
+ * - Command BARU /listgifts (KHUSUS owner, dicek via env.OWNER_USER_ID) -> manggil
+ *   getAvailableGifts, nampilin semua gift asli Telegram beserta ID & harga Stars-nya,
+ *   biar gampang disalin ke GIFT_CATALOG.
+ * - Command BARU /giftprofit (KHUSUS owner) -> nampilin total profit dari selisih
+ *   harga jual vs harga asli gift, yang kepakai (bukan real-time saldo, cuma akumulasi
+ *   pencatatan internal di KV `stats:giftProfit`).
+ * - Di handleGiftPaymentSuccess: SETELAH pembayaran custom masuk, kalau item itu punya
+ *   telegramGiftId, bot otomatis manggil sendGift() buat kirim gift ASLI ke penerima,
+ *   dibayar dari SALDO BOT (bukan dari uang pembeli lagi, itu udah masuk duluan lewat
+ *   invoice). Profit = price (yang dibayar user) - realPrice (biaya beli gift asli),
+ *   otomatis kecatat. Kalau sendGift gagal (saldo bot kurang / gift abis / ID salah),
+ *   fallback ke notifikasi fake seperti versi lama + kirim pesan error ke owner.
+ * ====================================================================
+ */
+
 export default {
   async fetch(request, env) {
     if (request.method !== "POST") {
-      return new Response("Anonymous bot v6 is running.", { status: 200 });
+      return new Response("Anonymous bot v7 is running.", { status: 200 });
     }
 
     let update;
@@ -166,6 +189,28 @@ async function handleMessage(message, env) {
   // ---- /inbox -> keluarkan semua pesan anonim yang masih tertunda di antrean ----
   if (text === "/inbox") {
     await handleInboxCommand(chatId, userId, env);
+    return;
+  }
+
+  // ---- /listgifts -> (KHUSUS owner) lihat daftar gift asli Telegram + ID & harga Stars ----
+  if (text === "/listgifts") {
+    if (!isOwner(userId, env)) {
+      await sendMessage(chatId, "Command ini khusus owner bot.", env);
+      return;
+    }
+    await handleListGifts(chatId, env);
+    return;
+  }
+
+  // ---- /giftprofit -> (KHUSUS owner) lihat total profit dari selisih harga gift ----
+  if (text === "/giftprofit") {
+    if (!isOwner(userId, env)) {
+      await sendMessage(chatId, "Command ini khusus owner bot.", env);
+      return;
+    }
+    const raw = await env.ANONIM_KV.get(`stats:giftProfit`);
+    const total = raw ? Number(raw) : 0;
+    await sendMessage(chatId, `💰 Total profit dari selisih harga gift asli sejauh ini: ${total} Stars.`, env);
     return;
   }
 
@@ -649,7 +694,7 @@ async function handleInlineQuery(inlineQuery, env) {
       title: "Kirim pesan anonim",
       description: "Kirim tautan biar orang ini bisa kirim pesan atau hadiah anonim ke kamu.",
       input_message_content: {
-        message_text: `Kirimkan saya pesan anonim atau hadiah:\n${link}`,
+        message_text: `Kirimkan saya pesan anonim atau hadiah:`,
       },
       reply_markup: {
         inline_keyboard: [
@@ -802,16 +847,19 @@ function isPremiumActive(profile) {
  * Tambah/ubah item di sini kalau mau custom katalognya.
  */
 const GIFT_CATALOG = [
-  { id: "heart", emoji: "💝", label: "Hati & Pita", price: 45 },
-  { id: "box", emoji: "🎁", label: "Kado", price: 75 },
-  { id: "rose", emoji: "🌹", label: "Mawar", price: 75 },
-  { id: "cake", emoji: "🎂", label: "Kue Ulang Tahun", price: 150 },
-  { id: "bouquet", emoji: "💐", label: "Buket Bunga", price: 150 },
-  { id: "rocket", emoji: "🚀", label: "Roket", price: 150 },
-  { id: "champagne", emoji: "🍾", label: "Sampanye", price: 150 },
-  { id: "trophy", emoji: "🏆", label: "Piala", price: 300 },
-  { id: "ring", emoji: "💍", label: "Cincin", price: 300 },
-  { id: "diamond", emoji: "💎", label: "Berlian", price: 300 },
+  // telegramGiftId & realPrice: isi manual pakai hasil /listgifts kalau mau item ini
+  // dikirim sebagai gift ASLI Telegram (bukan cuma notif fake). Biarin null kalau
+  // mau tetep pakai mode lama (fake notif doang, gak ada gift asli terkirim).
+  { id: "heart", emoji: "💝", label: "Hati & Pita", price: 45, telegramGiftId: null, realPrice: null },
+  { id: "box", emoji: "🎁", label: "Kado", price: 75, telegramGiftId: null, realPrice: null },
+  { id: "rose", emoji: "🌹", label: "Mawar", price: 75, telegramGiftId: null, realPrice: null },
+  { id: "cake", emoji: "🎂", label: "Kue Ulang Tahun", price: 150, telegramGiftId: null, realPrice: null },
+  { id: "bouquet", emoji: "💐", label: "Buket Bunga", price: 150, telegramGiftId: null, realPrice: null },
+  { id: "rocket", emoji: "🚀", label: "Roket", price: 150, telegramGiftId: null, realPrice: null },
+  { id: "champagne", emoji: "🍾", label: "Sampanye", price: 150, telegramGiftId: null, realPrice: null },
+  { id: "trophy", emoji: "🏆", label: "Piala", price: 300, telegramGiftId: null, realPrice: null },
+  { id: "ring", emoji: "💍", label: "Cincin", price: 300, telegramGiftId: null, realPrice: null },
+  { id: "diamond", emoji: "💎", label: "Berlian", price: 300, telegramGiftId: null, realPrice: null },
 ];
 
 function giftById(id) {
@@ -998,15 +1046,111 @@ async function handleGiftPaymentSuccess(userId, chatId, env) {
     return;
   }
 
-  const caption =
-    `🎁 Kamu dapat hadiah anonim: ${gift.emoji} ${gift.label}!` +
-    (pending.message ? `\n\nPesan: "${escapeHtml(pending.message)}"` : "");
+  // Kalau item ini dikonfigurasi punya gift ASLI Telegram, coba kirim itu dulu.
+  // Kalau berhasil: penerima dapet gift beneran yang nempel di profilnya, dan
+  // selisih (harga jual - harga asli) kecatat sebagai profit.
+  let realGiftSent = false;
+  if (gift.telegramGiftId) {
+    realGiftSent = await sendRealGift(targetUserId, gift.telegramGiftId, pending.message, env);
+    if (realGiftSent) {
+      const profit = gift.price - (gift.realPrice || 0);
+      await addGiftProfit(profit, env);
+    } else if (isOwnerConfigured(env)) {
+      await sendMessage(
+        Number(env.OWNER_USER_ID),
+        `⚠️ Gagal kirim gift asli (${gift.emoji} ${gift.label}, telegramGiftId: ${gift.telegramGiftId}) ke user ${targetUserId}. Kemungkinan saldo bot kurang atau gift sudah habis. Fallback ke notif fake dulu, cek manual ya.`,
+        env
+      );
+    }
+  }
 
-  await sendMessage(targetUserId, caption, env, replyButton(userId));
+  // Fallback (atau memang item ini belum dikonfigurasi gift asli): kirim notif fake seperti versi lama.
+  if (!realGiftSent) {
+    const caption =
+      `🎁 Kamu dapat hadiah anonim: ${gift.emoji} ${gift.label}!` +
+      (pending.message ? `\n\nPesan: "${escapeHtml(pending.message)}"` : "");
+    await sendMessage(targetUserId, caption, env, replyButton(userId));
+  }
+
   await incrementGiftCount(targetUserId, env);
-
   await env.ANONIM_KV.delete(`pending_gift:${userId}`);
   await sendMessage(chatId, "🎉 Hadiah berhasil dikirim secara anonim!", env, { reply_markup: postSendKeyboard() });
+}
+
+/** Nambahin nilai (bisa negatif) ke akumulasi profit gift di KV. */
+async function addGiftProfit(amount, env) {
+  const raw = await env.ANONIM_KV.get(`stats:giftProfit`);
+  const current = raw ? Number(raw) : 0;
+  await env.ANONIM_KV.put(`stats:giftProfit`, String(current + amount));
+}
+
+/** Cek apakah userId ini owner bot (dibandingkan ke env.OWNER_USER_ID). */
+function isOwner(userId, env) {
+  return isOwnerConfigured(env) && String(userId) === String(env.OWNER_USER_ID);
+}
+
+function isOwnerConfigured(env) {
+  return !!env.OWNER_USER_ID;
+}
+
+/**
+ * Kirim gift ASLI Telegram ke targetUserId, dibayar dari saldo Stars bot.
+ * text (pesan opsional dari pengirim anonim) ikut ditampilkan di gift-nya kalau ada,
+ * dipotong ke 128 karakter sesuai batas Bot API.
+ * Return true kalau sukses, false kalau gagal (owner perlu cek manual).
+ */
+async function sendRealGift(targetUserId, telegramGiftId, text, env) {
+  const url = `https://api.telegram.org/bot${env.BOT_TOKEN}/sendGift`;
+  const body = {
+    user_id: targetUserId,
+    gift_id: telegramGiftId,
+  };
+  if (text) {
+    body.text = text.slice(0, 128);
+  }
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json().catch(() => ({ ok: false }));
+    return !!data.ok;
+  } catch (e) {
+    return false;
+  }
+}
+
+/**
+ * Command /listgifts (khusus owner): ambil daftar gift asli Telegram yang lagi
+ * tersedia beserta ID & harga Stars-nya, biar gampang disalin ke GIFT_CATALOG.
+ */
+async function handleListGifts(chatId, env) {
+  const url = `https://api.telegram.org/bot${env.BOT_TOKEN}/getAvailableGifts`;
+  const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+  const data = await res.json().catch(() => ({ ok: false }));
+
+  if (!data.ok || !data.result?.gifts?.length) {
+    await sendMessage(chatId, "Gagal ambil daftar gift dari Telegram, atau memang lagi kosong.", env);
+    return;
+  }
+
+  const lines = data.result.gifts.map((g) => {
+    const limited = g.total_count ? ` (limited: ${g.remaining_count ?? "?"}/${g.total_count})` : "";
+    return `ID: ${g.id} — ${g.star_count} Stars${limited}`;
+  });
+
+  // Kirim per-chunk biar gak kena limit panjang pesan Telegram (4096 karakter)
+  const chunkSize = 30;
+  for (let i = 0; i < lines.length; i += chunkSize) {
+    const chunk = lines.slice(i, i + chunkSize).join("\n");
+    await sendMessage(chatId, `🎁 Daftar gift asli Telegram:\n\n${chunk}`, env);
+  }
+  await sendMessage(
+    chatId,
+    "Salin ID & harga Stars yang kamu mau ke GIFT_CATALOG (field telegramGiftId & realPrice), cocokkan sama emoji/label yang paling mirip ya.",
+    env
+  );
 }
 
 // ============ DATA HELPERS (KV) ============
