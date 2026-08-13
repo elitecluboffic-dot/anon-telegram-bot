@@ -625,8 +625,8 @@ async function handleTentangCommand(chatId, env) {
     `• 🔒 <b>Aman</b> — identitas pengirim gak pernah ditampilkan ke penerima, titik.\n` +
     `• 📬 <b>Sistem Inbox</b> — kamu yang menentukan kapan sebuah pesan dibuka & "dilihat".\n` +
     `• 🎁 <b>Hadiah Anonim</b> — kirim gift asli Telegram tanpa ketahuan siapa pengirimnya.\n` +
-    `• 🔗 <b>Tautan Custom</b> — biar link kamu gampang diingat & keliatan profesional (fitur Premium).\n\n` +
-    `Semua dibangun ringan & cepat di atas Cloudflare Workers, jadi kapan pun link kamu dibuka, bot selalu siap sedia.\n\n` +
+    `• 🔗 <b>Tautan Custom</b> — biar link kamu gampang diingat & keliatan keren (fitur Premium).\n\n` +
+    `Semua dibangun ringan & super cepat, jadi kapan pun link kamu dibuka, bot selalu siap sedia.\n\n` +
     `Ketik /start buat dapetin tautan pribadimu sendiri, atau /mylink buat kelola pengaturan.\n\n` +
     `🛠️ <b>Dibangun oleh:</b> ${creditLine}`;
 
