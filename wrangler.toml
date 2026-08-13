@@ -1,0 +1,19 @@
+name = "anon-telegram-bot"
+main = "src/worker.js"
+compatibility_date = "2024-11-01"
+
+# Binding KV Namespace buat simpan data user (kode unik -> user_id, dsb)
+# Setelah bikin KV namespace lewat `wrangler kv namespace create ANONIM_KV`,
+# masukkan id-nya di sini.
+[[kv_namespaces]]
+binding = "ANONIM_KV"
+id = "ec2f782fd18d4dc09cbecb518a1efe4b"
+
+# Environment variables non-secret (kalau ada) bisa taruh di sini
+[vars]
+BOT_USERNAME = "AnoGennBot"
+# Harga langganan Premium per bulan, dalam Telegram Stars (XTR). 1 = 1 Star.
+PREMIUM_STARS_PRICE = "50"
+
+# Secret (BOT_TOKEN) JANGAN ditaruh di file ini.
+# Set lewat: wrangler secret put BOT_TOKEN
