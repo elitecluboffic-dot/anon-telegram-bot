@@ -1,38 +1,59 @@
 /**
- * Anonymous Message Telegram Bot v3 - Cloudflare Workers
+ * Anonymous Message Telegram Bot v5 - Cloudflare Workers
  * -------------------------------------------------------
- * Tambahan dari v3:
- * - Premium sekarang LANGGANAN BULANAN 50 Stars/bulan (bukan sekali bayar selamanya)
- * - Pakai fitur subscription bawaan Telegram Stars (subscription_period),
- *   jadi Telegram yang otomatis re-charge user tiap bulan, bot tinggal terima event-nya
- * - /cancelpremium -> batalkan auto-renew (tetap aktif sampai periode berjalan habis)
- * - Status premium dicek berdasarkan tanggal expiry (premiumUntil), bukan flag boolean statis
+ * Tambahan dari v4:
+ * - BARU: tombol "📤 Bagikan" di menu sekarang pakai INLINE MODE Telegram
+ *   (switch_inline_query), bukan share-url biasa. Tap tombol -> muncul "Pilih Obrolan"
+ *   (chat picker bawaan Telegram) -> pilih chat -> bot ngirim pesan otomatis ke chat
+ *   itu (nampil "via @NamaBot") lengkap dengan tombol "Kirim pesan anonim" &
+ *   "Kirim hadiah anonim".
+ * - BARU: deep link "?start=gift_<code>" -> langsung masuk ke alur pilih hadiah
+ *   ke pemilik kode itu, TANPA perlu kirim pesan teks dulu.
+ * - PENTING: supaya update inline_query masuk ke webhook, inline mode bot HARUS
+ *   diaktifkan dulu lewat @BotFather -> /setinline (isi placeholder bebas, mis.
+ *   "Kirim pesan/hadiah anonim..."). Kalau belum diaktifkan, tombol Bagikan tetap
+ *   muncul tapi Telegram gak akan minta update ke bot kamu.
  *
- * Struktur data di KV (tambahan field):
+ * Tambahan dari v3 (tetap berlaku):
+ * - Premium tetap LANGGANAN BULANAN 50 Stars/bulan (subscription_period, tidak berubah)
+ * - Fitur "Kirim hadiah anonim" -> user bisa beli hadiah (emoji + harga Stars)
+ *   dan kirim ke orang TERAKHIR yang mereka kirimi pesan/hadiah, lengkap dengan pesan
+ *   opsional (maks 128 karakter), dibayar pakai Telegram Stars SEKALI BAYAR (bukan subscription).
+ * - Menu setelah pesan terkirim -> "Kirim pesan lainnya", "Hapus pesan",
+ *   "Kirim hadiah anonim" (reply keyboard, sesuai referensi screenshot).
+ * - /cancelpremium tetap ada, tidak berubah dari v3.
+ *
+ * Struktur data di KV (tambahan field dari v3):
  *   user:<userId> -> {
- *     code, name, createdAt, receivedCount,
+ *     code, name, createdAt, receivedCount, receivedGifts,
  *     premium, premiumUntil, premiumChargeId,
  *     settings: { photo: true }
  *   }
- *   awaiting_code:<userId> -> "1"  (state sedang nunggu input kode custom, TTL 5 menit)
+ *   awaiting_code:<userId>          -> "1"  (nunggu input kode custom, TTL 5 menit)
+ *   last_recipient:<userId>        -> targetUserId (orang TERAKHIR yang dikirimi pesan/hadiah)
+ *   last_sent:<userId>             -> JSON { targetUserId, messageId } (buat fitur "Hapus pesan")
+ *   awaiting_gift_pick:<userId>    -> "1"  (lagi milih hadiah dari katalog, TTL 5 menit)
+ *   awaiting_gift_message:<userId> -> "1"  (lagi isi pesan opsional buat hadiah, TTL 15 menit)
+ *   pending_gift:<userId>          -> JSON { giftId, targetUserId, message } (TTL 15 menit,
+ *                                      dibaca lagi pas successful_payment masuk)
  *
- * CATATAN PENTING SOAL TELEGRAM STARS SUBSCRIPTION:
- * - Currency HARUS "XTR" dan provider_token dikosongkan ("").
- * - subscription_period WAJIB diisi 2592000 (= 30 hari dalam detik) -- itu satu-satunya
- *   nilai yang didukung Telegram saat ini untuk subscription Stars.
- * - Wajib handle update "pre_checkout_query" -> jawab ok:true.
- * - Pembayaran (termasuk re-charge otomatis tiap bulan) masuk sebagai message.successful_payment,
- *   dengan field subscription_expiration_date (unix timestamp) yang bot pakai buat set premiumUntil.
- * - User bisa cancel langganan lewat Telegram Settings > My Subscriptions, ATAU
- *   bot bisa cancel via API editUserStarSubscription (dipakai di /cancelpremium).
- * - Kalau user cancel, mereka TETAP premium sampai periode yang sudah dibayar habis,
- *   baru setelah itu tidak di-charge lagi otomatis.
+ * CATATAN PENTING SOAL TELEGRAM STARS - LANGGANAN vs SEKALI BAYAR:
+ * - Currency HARUS "XTR" dan provider_token dikosongkan ("") untuk KEDUANYA (premium & hadiah).
+ * - Premium: WAJIB isi subscription_period = 2592000 (30 hari, satu-satunya nilai yang didukung).
+ * - Hadiah: JANGAN isi subscription_period sama sekali -> jadi invoice SEKALI BAYAR biasa.
+ * - Wajib handle update "pre_checkout_query" -> jawab ok:true (berlaku buat kedua jenis invoice).
+ * - Pembayaran masuk sebagai message.successful_payment. Bot membedakan jenis pembayaran
+ *   lewat field invoice_payload:
+ *     - "premium_subscription"      -> proses sebagai langganan premium
+ *     - "gift:<userId>"             -> proses sebagai pembelian hadiah anonim
+ * - User bisa cancel LANGGANAN (bukan hadiah, karena hadiah sekali bayar) lewat Telegram
+ *   Settings > My Subscriptions, ATAU bot bisa cancel via editUserStarSubscription (/cancelpremium).
  */
 
 export default {
   async fetch(request, env) {
     if (request.method !== "POST") {
-      return new Response("Anonymous bot v3 is running.", { status: 200 });
+      return new Response("Anonymous bot v4 is running.", { status: 200 });
     }
 
     let update;
@@ -47,6 +68,8 @@ export default {
         await handlePreCheckout(update.pre_checkout_query, env);
       } else if (update.callback_query) {
         await handleCallback(update.callback_query, env);
+      } else if (update.inline_query) {
+        await handleInlineQuery(update.inline_query, env);
       } else if (update.message) {
         await handleMessage(update.message, env);
       }
@@ -65,9 +88,18 @@ async function handleMessage(message, env) {
   const userId = message.from.id;
   const text = message.text || "";
 
-  // ---- Pembayaran Stars sukses (langganan baru ATAU re-charge bulanan otomatis) ----
+  // ---- Pembayaran Stars sukses (premium bulanan ATAU pembelian hadiah anonim) ----
   if (message.successful_payment) {
     const sp = message.successful_payment;
+    const payload = sp.invoice_payload || "";
+
+    // -- Pembelian hadiah anonim (sekali bayar) --
+    if (payload.startsWith("gift:")) {
+      await handleGiftPaymentSuccess(userId, chatId, env);
+      return;
+    }
+
+    // -- Langganan premium bulanan (pembayaran pertama ATAU re-charge otomatis) --
     const expiryDate = sp.subscription_expiration_date
       ? new Date(sp.subscription_expiration_date * 1000)
       : new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // fallback kalau field gak ada
@@ -105,17 +137,28 @@ async function handleMessage(message, env) {
       return;
     }
 
-    const targetUserId = await env.ANONIM_KV.get(`code:${param}`);
-    if (!targetUserId) {
+    // Deep link "?start=gift_<code>" -> langsung ke alur pilih hadiah, skip kirim pesan dulu
+    const isGiftDeepLink = param.startsWith("gift_");
+    const code = isGiftDeepLink ? param.slice(5) : param;
+
+    const targetUserIdParam = await env.ANONIM_KV.get(`code:${code}`);
+    if (!targetUserIdParam) {
       await sendMessage(chatId, "Link tidak valid atau sudah dicabut oleh pemiliknya.", env);
       return;
     }
-    if (Number(targetUserId) === userId) {
-      await sendMessage(chatId, "Ini link kamu sendiri, gak bisa kirim pesan ke diri sendiri ya.", env);
+    if (Number(targetUserIdParam) === userId) {
+      await sendMessage(chatId, "Ini link kamu sendiri, gak bisa kirim pesan/hadiah ke diri sendiri ya.", env);
       return;
     }
 
-    await env.ANONIM_KV.put(`state:${userId}`, targetUserId, { expirationTtl: 3600 });
+    if (isGiftDeepLink) {
+      await env.ANONIM_KV.put(`last_recipient:${userId}`, targetUserIdParam);
+      await env.ANONIM_KV.put(`awaiting_gift_pick:${userId}`, "1", { expirationTtl: 300 });
+      await sendMessage(chatId, "🎁 Pilih hadiah yang mau kamu kirim:", env, { reply_markup: giftCatalogKeyboard() });
+      return;
+    }
+
+    await env.ANONIM_KV.put(`state:${userId}`, targetUserIdParam, { expirationTtl: 3600 });
     await sendMessage(chatId, "✍️ Tulis pesan anonim kamu sekarang (boleh teks atau gambar).", env);
     return;
   }
@@ -156,11 +199,153 @@ async function handleMessage(message, env) {
     return;
   }
 
+  // ---- Tombol menu setelah kirim pesan: kirim pesan lagi ke orang yang sama ----
+  if (text === "📧 Kirim pesan lainnya") {
+    const lastRecipient = await env.ANONIM_KV.get(`last_recipient:${userId}`);
+    if (!lastRecipient) {
+      await sendMessage(chatId, "Belum ada riwayat penerima. Buka link seseorang dulu ya buat kirim pesan anonim.", env);
+      return;
+    }
+    await env.ANONIM_KV.put(`state:${userId}`, lastRecipient, { expirationTtl: 3600 });
+    await sendMessage(chatId, "✍️ Tulis pesan anonim kamu sekarang (boleh teks atau gambar).", env);
+    return;
+  }
+
+  // ---- Tombol menu: hapus pesan anonim terakhir yang dikirim ----
+  if (text === "🗑️ Hapus pesan") {
+    const raw = await env.ANONIM_KV.get(`last_sent:${userId}`);
+    if (!raw) {
+      await sendMessage(chatId, "Gak ada pesan yang bisa dihapus.", env);
+      return;
+    }
+    const lastSent = JSON.parse(raw);
+    const ok = await deleteMessage(Number(lastSent.targetUserId), lastSent.messageId, env);
+    await sendMessage(
+      chatId,
+      ok
+        ? "🗑️ Pesan berhasil dihapus dari sisi penerima."
+        : "Gagal menghapus pesan (mungkin sudah kedaluwarsa atau sudah dihapus duluan).",
+      env
+    );
+    if (ok) await env.ANONIM_KV.delete(`last_sent:${userId}`);
+    return;
+  }
+
+  // ---- Tombol menu: mulai alur kirim hadiah anonim ----
+  if (text === "🎁 Kirim hadiah anonim") {
+    const lastRecipient = await env.ANONIM_KV.get(`last_recipient:${userId}`);
+    if (!lastRecipient) {
+      await sendMessage(chatId, "Kirim pesan anonim dulu ya, baru bisa kirim hadiah ke orang itu.", env);
+      return;
+    }
+    await env.ANONIM_KV.put(`awaiting_gift_pick:${userId}`, "1", { expirationTtl: 300 });
+    await sendMessage(chatId, "🎁 Pilih hadiah yang mau kamu kirim:", env, { reply_markup: giftCatalogKeyboard() });
+    return;
+  }
+
   // ---- Sedang menunggu input kode custom (dari tombol menu) ----
   const awaitingCode = await env.ANONIM_KV.get(`awaiting_code:${userId}`);
   if (awaitingCode) {
     await env.ANONIM_KV.delete(`awaiting_code:${userId}`);
     await trySetCustomCode(chatId, userId, text, env);
+    return;
+  }
+
+  // ---- Sedang memilih hadiah dari katalog ----
+  const awaitingGiftPick = await env.ANONIM_KV.get(`awaiting_gift_pick:${userId}`);
+  if (awaitingGiftPick) {
+    if (text === "⬅️ Kembali") {
+      await env.ANONIM_KV.delete(`awaiting_gift_pick:${userId}`);
+      await sendMessage(chatId, "Oke, dibatalin.", env, { reply_markup: postSendKeyboard() });
+      return;
+    }
+
+    const gift = findGiftByButtonLabel(text);
+    if (!gift) {
+      await sendMessage(chatId, "Pilih salah satu hadiah dari tombol di bawah ya.", env, {
+        reply_markup: giftCatalogKeyboard(),
+      });
+      return;
+    }
+
+    const lastRecipient = await env.ANONIM_KV.get(`last_recipient:${userId}`);
+    if (!lastRecipient) {
+      await env.ANONIM_KV.delete(`awaiting_gift_pick:${userId}`);
+      await sendMessage(chatId, "Riwayat penerima sudah hilang, coba kirim pesan anonim dulu ya.", env, {
+        reply_markup: mainMenuKeyboard(),
+      });
+      return;
+    }
+
+    await env.ANONIM_KV.put(
+      `pending_gift:${userId}`,
+      JSON.stringify({ giftId: gift.id, targetUserId: lastRecipient, message: "" }),
+      { expirationTtl: 900 }
+    );
+    await env.ANONIM_KV.delete(`awaiting_gift_pick:${userId}`);
+    await env.ANONIM_KV.put(`awaiting_gift_message:${userId}`, "1", { expirationTtl: 900 });
+
+    await sendMessage(chatId, gift.emoji, env);
+    await sendMessage(
+      chatId,
+      "☝️ Ini hadiah yang kamu pilih!\nKalau mau, kamu bisa tambah pesan buat hadiahnya — atau langsung skip aja.\nMaksimal 128 karakter ya.",
+      env,
+      { reply_markup: giftMessageKeyboard() }
+    );
+    return;
+  }
+
+  // ---- Sedang isi pesan opsional buat hadiah ----
+  const awaitingGiftMessage = await env.ANONIM_KV.get(`awaiting_gift_message:${userId}`);
+  if (awaitingGiftMessage) {
+    if (text === "⬅️ Kembali") {
+      await env.ANONIM_KV.delete(`awaiting_gift_message:${userId}`);
+      await env.ANONIM_KV.delete(`pending_gift:${userId}`);
+      await sendMessage(chatId, "Oke, dibatalin.", env, { reply_markup: postSendKeyboard() });
+      return;
+    }
+
+    const raw = await env.ANONIM_KV.get(`pending_gift:${userId}`);
+    if (!raw) {
+      await env.ANONIM_KV.delete(`awaiting_gift_message:${userId}`);
+      await sendMessage(chatId, "Sesi hadiah sudah kedaluwarsa. Mulai lagi dari menu ya.", env, {
+        reply_markup: postSendKeyboard(),
+      });
+      return;
+    }
+
+    let giftMessage = "";
+    if (text !== "⏭️ Lewati" && text) {
+      if (text.length > 128) {
+        await sendMessage(chatId, "Pesannya kepanjangan, maksimal 128 karakter ya. Coba lagi.", env);
+        return;
+      }
+      giftMessage = text;
+    } else if (!text) {
+      await sendMessage(chatId, "Kirim teks aja ya buat pesan hadiahnya, atau tekan Lewati.", env);
+      return;
+    }
+
+    const pending = JSON.parse(raw);
+    pending.message = giftMessage;
+    await env.ANONIM_KV.put(`pending_gift:${userId}`, JSON.stringify(pending), { expirationTtl: 900 });
+    await env.ANONIM_KV.delete(`awaiting_gift_message:${userId}`);
+
+    const gift = giftById(pending.giftId);
+    const summary =
+      `🎁 Hadiah kamu siap dikirim!\n\n` +
+      `Detailnya nih:\n` +
+      `Penerima: orang terakhir yang Anda kirimi pesan\n` +
+      `Harga Hadiah: ${gift.price}\n` +
+      `Pesan Kamu: ${giftMessage || "-"}\n` +
+      `Total: ${gift.price}\n\n` +
+      `Langsung aja lanjut ke pembayaran ya.`;
+
+    await sendMessage(chatId, summary, env, {
+      reply_markup: {
+        inline_keyboard: [[{ text: `🎉 Bayar & Kirim Hadiah ⭐${gift.price}`, callback_data: "gift:pay" }]],
+      },
+    });
     return;
   }
 
@@ -187,6 +372,7 @@ async function handleMessage(message, env) {
   if (targetUserId) {
     const targetProfile = await getProfile(targetUserId, env);
     const settings = targetProfile?.settings || { photo: true };
+    let sendResult = null;
 
     if (message.photo && message.photo.length > 0) {
       if (!settings.photo) {
@@ -195,16 +381,41 @@ async function handleMessage(message, env) {
       }
       const fileId = message.photo[message.photo.length - 1].file_id;
       const caption = message.caption ? `\n\n"${message.caption}"` : "";
-      await sendPhoto(Number(targetUserId), fileId, `📩 Kamu dapat gambar anonim baru!${caption}`, env, replyButton(userId));
+      sendResult = await sendPhoto(
+        Number(targetUserId),
+        fileId,
+        `📩 Kamu dapat gambar anonim baru!${caption}`,
+        env,
+        replyButton(userId)
+      );
     } else if (text) {
-      await sendMessage(Number(targetUserId), `📩 Kamu dapat pesan anonim baru:\n\n"${text}"`, env, replyButton(userId));
+      sendResult = await sendMessage(
+        Number(targetUserId),
+        `📩 Kamu dapat pesan anonim baru:\n\n"${text}"`,
+        env,
+        replyButton(userId)
+      );
     } else {
       await sendMessage(chatId, "Jenis pesan ini belum didukung. Kirim teks atau gambar ya.", env);
       return;
     }
 
     await incrementReceivedCount(targetUserId, env);
-    await sendMessage(chatId, "Pesan berhasil dikirim secara anonim ✅", env);
+
+    // simpan riwayat penerima terakhir (dipakai buat "Kirim pesan lainnya" & "Kirim hadiah anonim")
+    await env.ANONIM_KV.put(`last_recipient:${userId}`, String(targetUserId));
+
+    // simpan message_id yang baru dikirim (dipakai buat "Hapus pesan")
+    if (sendResult?.result?.message_id) {
+      await env.ANONIM_KV.put(
+        `last_sent:${userId}`,
+        JSON.stringify({ targetUserId: String(targetUserId), messageId: sendResult.result.message_id })
+      );
+    }
+
+    await sendMessage(chatId, "Pesan berhasil dikirim secara anonim ✅\n\nMau ngapain lagi?", env, {
+      reply_markup: postSendKeyboard(),
+    });
     await env.ANONIM_KV.delete(`state:${userId}`);
     return;
   }
@@ -267,6 +478,24 @@ async function handleCallback(cq, env) {
       env,
       { reply_markup: backKeyboard() }
     );
+  } else if (data === "gift:pay") {
+    // ---- Konfirmasi bayar hadiah anonim -> kirim invoice Stars sekali bayar ----
+    const raw = await env.ANONIM_KV.get(`pending_gift:${userId}`);
+    if (!raw) {
+      await sendMessage(chatId, "Sesi hadiah sudah kedaluwarsa. Mulai lagi dari menu ya.", env, {
+        reply_markup: postSendKeyboard(),
+      });
+      return;
+    }
+    const pending = JSON.parse(raw);
+    const gift = giftById(pending.giftId);
+    if (!gift) {
+      await sendMessage(chatId, "Hadiah tidak ditemukan, coba pilih ulang dari menu.", env, {
+        reply_markup: postSendKeyboard(),
+      });
+      return;
+    }
+    await sendGiftInvoice(chatId, userId, gift, env);
   } else if (data.startsWith("reply:")) {
     const senderUserId = data.split(":")[1];
     // userId yang klik tombol ini (cq.from.id) mau balas ke senderUserId
@@ -275,22 +504,96 @@ async function handleCallback(cq, env) {
   }
 }
 
+// ============ INLINE QUERY HANDLER (fitur "📤 Bagikan") ============
+
+/**
+ * Dipanggil saat user tap tombol "📤 Bagikan" (switch_inline_query) lalu ketik apa saja
+ * di kolom pencarian setelah nama bot (atau langsung, karena query boleh kosong).
+ * Telegram mengirim update.inline_query, bot menjawab lewat answerInlineQuery dengan
+ * daftar hasil. User pilih salah satu hasil -> Telegram kirimkan hasil itu SEBAGAI PESAN
+ * ke chat yang lagi dibuka (nampak "via @NamaBot" di pesannya).
+ *
+ * PENTING: inline mode bot harus diaktifkan dulu lewat @BotFather -> /setinline,
+ * kalau belum, update inline_query tidak akan pernah masuk ke webhook ini.
+ */
+async function handleInlineQuery(inlineQuery, env) {
+  const userId = inlineQuery.from.id;
+  const profile = await getOrCreateProfile(userId, inlineQuery.from, env);
+  const link = buildLink(profile.code, env);
+  const giftLink = buildLink(`gift_${profile.code}`, env);
+
+  const results = [
+    {
+      type: "article",
+      id: "send_message",
+      title: "Kirim pesan anonim",
+      description: "Kirim tautan biar orang ini bisa kirim pesan atau hadiah anonim ke kamu.",
+      input_message_content: {
+        message_text: `Kirimkan saya pesan anonim atau hadiah:\n${link}`,
+      },
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: "📧 Kirim pesan anonim", url: link }],
+          [{ text: "🎁 Kirim hadiah anonim", url: giftLink }],
+        ],
+      },
+    },
+    {
+      type: "article",
+      id: "send_plain_link",
+      title: "Kirim tautan pribadi",
+      description: "Klik untuk mengirim tautan pribadimu di chat ini.",
+      input_message_content: {
+        message_text: link,
+      },
+    },
+  ];
+
+  await answerInlineQuery(inlineQuery.id, results, env);
+}
+
+async function answerInlineQuery(inlineQueryId, results, env) {
+  const url = `https://api.telegram.org/bot${env.BOT_TOKEN}/answerInlineQuery`;
+  await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      inline_query_id: inlineQueryId,
+      results,
+      cache_time: 0,
+      is_personal: true,
+    }),
+  });
+}
+
 // ============ MENU BUILDERS ============
 
 function mainMenuKeyboard() {
   return { keyboard: [[{ text: "Tautan pribadi saya" }]], resize_keyboard: true };
 }
 
+/** Menu yang muncul setelah pesan anonim berhasil terkirim. */
+function postSendKeyboard() {
+  return {
+    keyboard: [
+      [{ text: "📧 Kirim pesan lainnya" }],
+      [{ text: "🗑️ Hapus pesan" }],
+      [{ text: "🎁 Kirim hadiah anonim" }],
+    ],
+    resize_keyboard: true,
+  };
+}
+
 function settingsInlineKeyboard(link) {
-  const shareUrl = `https://t.me/share/url?url=${encodeURIComponent(link)}&text=${encodeURIComponent(
-    "Kirim aku pesan anonim di sini 👇"
-  )}`;
   return {
     inline_keyboard: [
       [{ text: "⚙️ Umum", callback_data: "menu:umum" }, { text: "📎 Media", callback_data: "menu:media" }],
       [{ text: "🧪 Fitur", callback_data: "menu:fitur" }, { text: "🔗 Custom Link", callback_data: "menu:customlink" }],
       [{ text: "🔄 Cabut Tautan", callback_data: "menu:revoke" }],
-      [{ text: "📤 Bagikan", url: shareUrl }, { text: "📋 Salin Tautan", callback_data: "menu:copy" }],
+      // switch_inline_query kosong -> tap tombol ini langsung buka layar "Pilih Obrolan"
+      // bawaan Telegram, lalu begitu user pilih chat, hasil dari handleInlineQuery()
+      // dikirim otomatis ke chat itu (nampil "via @NamaBot").
+      [{ text: "📤 Bagikan", switch_inline_query: "" }, { text: "📋 Salin Tautan", callback_data: "menu:copy" }],
     ],
   };
 }
@@ -310,8 +613,8 @@ function mediaKeyboard(settings) {
 }
 
 /**
- * Tombol "Balas" yang disisipkan di bawah pesan anonim yang diteruskan.
- * originalSenderUserId = user yang TADI mengirim pesan ini (disembunyikan di callback_data,
+ * Tombol "Balas" yang disisipkan di bawah pesan anonim / hadiah yang diteruskan.
+ * originalSenderUserId = user yang TADI mengirim ini (disembunyikan di callback_data,
  * gak pernah ditampilkan sebagai teks ke penerima).
  */
 function replyButton(originalSenderUserId) {
@@ -360,6 +663,7 @@ function formatStatsText(profile, link) {
     `👤 Nama: ${escapeHtml(profile.name)}\n` +
     `${premiumActive ? `⭐ Status: Premium (sampai ${profile.premiumUntil})\n` : ""}` +
     `🔢 Jumlah pesan diterima: ${profile.receivedCount || 0}\n` +
+    `🎁 Jumlah hadiah diterima: ${profile.receivedGifts || 0}\n` +
     `📅 Tanggal pembuatan tautan: ${profile.createdAt}\n` +
     `🔗 Tautan: ${link}`
   );
@@ -369,6 +673,53 @@ function formatStatsText(profile, link) {
 function isPremiumActive(profile) {
   if (!profile?.premiumUntil) return false;
   return new Date(profile.premiumUntil.replace(" UTC", "Z").replace(" ", "T")) > new Date();
+}
+
+// ============ KATALOG HADIAH ANONIM ============
+
+/**
+ * Katalog hadiah statis. Harga dalam Stars (XTR), sesuai contoh referensi.
+ * Tambah/ubah item di sini kalau mau custom katalognya.
+ */
+const GIFT_CATALOG = [
+  { id: "heart", emoji: "💝", label: "Hati & Pita", price: 45 },
+  { id: "box", emoji: "🎁", label: "Kado", price: 75 },
+  { id: "rose", emoji: "🌹", label: "Mawar", price: 75 },
+  { id: "cake", emoji: "🎂", label: "Kue Ulang Tahun", price: 150 },
+  { id: "bouquet", emoji: "💐", label: "Buket Bunga", price: 150 },
+  { id: "rocket", emoji: "🚀", label: "Roket", price: 150 },
+  { id: "champagne", emoji: "🍾", label: "Sampanye", price: 150 },
+  { id: "trophy", emoji: "🏆", label: "Piala", price: 300 },
+  { id: "ring", emoji: "💍", label: "Cincin", price: 300 },
+  { id: "diamond", emoji: "💎", label: "Berlian", price: 300 },
+];
+
+function giftById(id) {
+  return GIFT_CATALOG.find((g) => g.id === id);
+}
+
+function giftButtonLabel(g) {
+  return `${g.emoji} ${g.price}`;
+}
+
+function findGiftByButtonLabel(text) {
+  if (!text) return null;
+  return GIFT_CATALOG.find((g) => giftButtonLabel(g) === text.trim());
+}
+
+/** Reply keyboard grid 3 kolom buat milih hadiah, plus tombol Kembali. */
+function giftCatalogKeyboard() {
+  const rows = [];
+  for (let i = 0; i < GIFT_CATALOG.length; i += 3) {
+    rows.push(GIFT_CATALOG.slice(i, i + 3).map((g) => ({ text: giftButtonLabel(g) })));
+  }
+  rows.push([{ text: "⬅️ Kembali" }]);
+  return { keyboard: rows, resize_keyboard: true };
+}
+
+/** Keyboard buat step "tambah pesan opsional buat hadiah". */
+function giftMessageKeyboard() {
+  return { keyboard: [[{ text: "⏭️ Lewati" }], [{ text: "⬅️ Kembali" }]], resize_keyboard: true };
 }
 
 // ============ CUSTOM LINK (PREMIUM) ============
@@ -444,6 +795,30 @@ async function sendUpgradeInvoice(chatId, env) {
   });
 }
 
+/**
+ * Invoice buat beli hadiah anonim. SEKALI BAYAR -> subscription_period TIDAK diisi.
+ * payload dibikin "gift:<userId>" (bukan JSON) supaya tetap di bawah batas panjang payload
+ * Telegram walau pesan hadiahnya panjang; detail lengkap (gift id, target, pesan) diambil
+ * lagi dari KV pending_gift:<userId> pas successful_payment masuk.
+ */
+async function sendGiftInvoice(chatId, userId, gift, env) {
+  const url = `https://api.telegram.org/bot${env.BOT_TOKEN}/sendInvoice`;
+  await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      chat_id: chatId,
+      title: `Hadiah Anonim: ${gift.emoji} ${gift.label}`,
+      description: `Kirim hadiah "${gift.label}" secara anonim ke orang terakhir yang kamu kirimi pesan.`,
+      payload: `gift:${userId}`,
+      currency: "XTR", // WAJIB "XTR" untuk Telegram Stars
+      prices: [{ label: gift.label, amount: gift.price }],
+      provider_token: "", // WAJIB dikosongkan untuk Stars
+      // TIDAK ada subscription_period di sini -> jadi invoice sekali bayar biasa
+    }),
+  });
+}
+
 async function handlePreCheckout(pcq, env) {
   const url = `https://api.telegram.org/bot${env.BOT_TOKEN}/answerPreCheckoutQuery`;
   await fetch(url, {
@@ -475,6 +850,45 @@ async function cancelStarSubscription(userId, chargeId, env) {
   return !!data.ok;
 }
 
+/**
+ * Dipanggil setelah pembayaran hadiah anonim sukses (invoice_payload "gift:<userId>").
+ * Ambil detail hadiah dari KV pending_gift, kirim ke target, lalu bersihkan state.
+ */
+async function handleGiftPaymentSuccess(userId, chatId, env) {
+  const raw = await env.ANONIM_KV.get(`pending_gift:${userId}`);
+  if (!raw) {
+    await sendMessage(
+      chatId,
+      "Pembayaran diterima, tapi detail hadiahnya sudah kedaluwarsa. Kalau perlu bantuan, hubungi admin.",
+      env,
+      { reply_markup: postSendKeyboard() }
+    );
+    return;
+  }
+
+  const pending = JSON.parse(raw);
+  const gift = giftById(pending.giftId);
+  const targetUserId = Number(pending.targetUserId);
+
+  if (!gift || !targetUserId) {
+    await sendMessage(chatId, "Pembayaran diterima, tapi data hadiah tidak lengkap. Hubungi admin ya.", env, {
+      reply_markup: postSendKeyboard(),
+    });
+    await env.ANONIM_KV.delete(`pending_gift:${userId}`);
+    return;
+  }
+
+  const caption =
+    `🎁 Kamu dapat hadiah anonim: ${gift.emoji} ${gift.label}!` +
+    (pending.message ? `\n\nPesan: "${escapeHtml(pending.message)}"` : "");
+
+  await sendMessage(targetUserId, caption, env, replyButton(userId));
+  await incrementGiftCount(targetUserId, env);
+
+  await env.ANONIM_KV.delete(`pending_gift:${userId}`);
+  await sendMessage(chatId, "🎉 Hadiah berhasil dikirim secara anonim!", env, { reply_markup: postSendKeyboard() });
+}
+
 // ============ DATA HELPERS (KV) ============
 
 async function getProfile(userId, env) {
@@ -493,6 +907,7 @@ async function getOrCreateProfile(userId, fromUser, env) {
     name,
     createdAt: new Date().toISOString().slice(0, 19).replace("T", " ") + " UTC",
     receivedCount: 0,
+    receivedGifts: 0,
     premium: false,
     premiumUntil: null,
     premiumChargeId: null,
@@ -515,6 +930,13 @@ async function incrementReceivedCount(userId, env) {
   const profile = await getProfile(userId, env);
   if (!profile) return;
   profile.receivedCount = (profile.receivedCount || 0) + 1;
+  await env.ANONIM_KV.put(`user:${userId}`, JSON.stringify(profile));
+}
+
+async function incrementGiftCount(userId, env) {
+  const profile = await getProfile(userId, env);
+  if (!profile) return;
+  profile.receivedGifts = (profile.receivedGifts || 0) + 1;
   await env.ANONIM_KV.put(`user:${userId}`, JSON.stringify(profile));
 }
 
@@ -549,20 +971,22 @@ function escapeHtml(str) {
 
 async function sendMessage(chatId, text, env, extra = {}) {
   const url = `https://api.telegram.org/bot${env.BOT_TOKEN}/sendMessage`;
-  await fetch(url, {
+  const res = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ chat_id: chatId, text, ...extra }),
   });
+  return res.json().catch(() => null);
 }
 
 async function sendPhoto(chatId, fileId, caption, env, extra = {}) {
   const url = `https://api.telegram.org/bot${env.BOT_TOKEN}/sendPhoto`;
-  await fetch(url, {
+  const res = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ chat_id: chatId, photo: fileId, caption, ...extra }),
   });
+  return res.json().catch(() => null);
 }
 
 async function editMessageText(chatId, messageId, text, env, extra = {}) {
@@ -572,6 +996,17 @@ async function editMessageText(chatId, messageId, text, env, extra = {}) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ chat_id: chatId, message_id: messageId, text, ...extra }),
   });
+}
+
+async function deleteMessage(chatId, messageId, env) {
+  const url = `https://api.telegram.org/bot${env.BOT_TOKEN}/deleteMessage`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ chat_id: chatId, message_id: messageId }),
+  });
+  const data = await res.json().catch(() => ({ ok: false }));
+  return !!data.ok;
 }
 
 async function answerCallbackQuery(callbackQueryId, env, text, showAlert = false) {
