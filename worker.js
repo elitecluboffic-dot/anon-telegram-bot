@@ -851,20 +851,23 @@ function isPremiumActive(profile) {
  * Katalog hadiah statis. Harga dalam Stars (XTR), sesuai contoh referensi.
  * Tambah/ubah item di sini kalau mau custom katalognya.
  *
- * CATATAN: hasil /listgifts nunjukin ada 2 gift dengan emoji hint 🎂 sama-sama
- * 50 Stars (ID 6046178578163303744 dan ID 5170144170496491616) — padahal salah
- * satunya sebenarnya "Boneka Beruang Tentara" (bukan kue), cuma field
- * sticker.emoji-nya kebetulan sama. Item "bear" di bawah pakai salah satu ID itu
- * sebagai PLACEHOLDER SEMENTARA — WAJIB dicek ulang manual pakai /listgifts versi
- * sticker (lihat handleListGifts) buat mastiin ID mana yang beneran beruang,
- * baru swap ID-nya kalau ternyata kebalik sama item "cake" di bawah.
+ * CATATAN (RESOLVED): sebelumnya ada 2 gift dengan emoji hint 🎂 sama-sama 50 Stars
+ * (ID 6046178578163303744 dan ID 5170144170496491616), dan salah satunya ternyata
+ * bukan kue melainkan "Boneka Beruang Tentara" (field sticker.emoji-nya kebetulan
+ * sama). Sudah diverifikasi manual lewat preview sticker asli di /listgifts, dan
+ * ID-nya SUDAH DITUKAR ke pasangan yang benar di bawah ini:
+ *   - cake -> 5170144170496491616
+ *   - bear -> 6046178578163303744
  */
 const GIFT_CATALOG = [
+  // telegramGiftId & realPrice diisi dari hasil /listgifts (dicocokkan lewat sticker
+  // asli, bukan cuma emoji hint). price = harga jual ke pembeli (sesuai daftar harga
+  // terbaru).
   { id: "heart", emoji: "💝", label: "Hati & Pita", price: 45, telegramGiftId: "5170145012310081615", realPrice: 15 },
   { id: "box", emoji: "🎁", label: "Kado", price: 75, telegramGiftId: "5170250947678437525", realPrice: 25 },
   { id: "rose", emoji: "🌹", label: "Mawar", price: 75, telegramGiftId: "5168103777563050263", realPrice: 25 },
-  { id: "cake", emoji: "🎂", label: "Kue Ulang Tahun", price: 150, telegramGiftId: "6046178578163303744", realPrice: 50 },
-  { id: "bear", emoji: "🧸", label: "Boneka Beruang Tentara", price: 200, telegramGiftId: "5170144170496491616", realPrice: 50 },
+  { id: "cake", emoji: "🎂", label: "Kue Ulang Tahun", price: 150, telegramGiftId: "5170144170496491616", realPrice: 50 },
+  { id: "bear", emoji: "🧸", label: "Boneka Beruang Tentara", price: 200, telegramGiftId: "6046178578163303744", realPrice: 50 },
   { id: "bouquet", emoji: "💐", label: "Buket Bunga", price: 150, telegramGiftId: "5170314324215857265", realPrice: 50 },
   { id: "rocket", emoji: "🚀", label: "Roket", price: 150, telegramGiftId: "5170564780938756245", realPrice: 50 },
   { id: "champagne", emoji: "🍾", label: "Sampanye", price: 150, telegramGiftId: "6028601630662853006", realPrice: 50 },
@@ -1136,11 +1139,11 @@ async function sendRealGift(targetUserId, telegramGiftId, text, env) {
  * Command /listgifts (khusus owner): ambil daftar gift asli Telegram yang lagi
  * tersedia beserta ID & harga Stars-nya, biar gampang disalin ke GIFT_CATALOG.
  *
- * SEKARANG BENERAN kirim tiap gift sebagai STIKER dulu (pakai file_id dari field
- * `sticker` di response getAvailableGifts) SEBELUM caption teks ID/harga nyusul.
- * Ini penting terutama buat gift-gift yang emoji hint-nya sama/duplikat (misal ada
- * 2 gift sama-sama muncul sebagai 🎂 padahal beda wujud) — dengan liat stiker
- * aslinya, owner bisa mastiin ID mana yang cocok buat item apa di GIFT_CATALOG.
+ * Kirim tiap gift sebagai STIKER dulu (pakai file_id dari field `sticker` di
+ * response getAvailableGifts) SEBELUM caption teks ID/harga nyusul. Ini penting
+ * terutama buat gift-gift yang emoji hint-nya sama/duplikat (misal ada 2 gift
+ * sama-sama muncul sebagai 🎂 padahal beda wujud) — dengan liat stiker aslinya,
+ * owner bisa mastiin ID mana yang cocok buat item apa di GIFT_CATALOG.
  */
 async function handleListGifts(chatId, env) {
   const url = `https://api.telegram.org/bot${env.BOT_TOKEN}/getAvailableGifts`;
@@ -1160,7 +1163,7 @@ async function handleListGifts(chatId, env) {
 
     // Kirim stiker dulu (kalau file_id ada) biar owner LIHAT WUJUD ASLI gift-nya,
     // karena emoji hint di atas kadang sama walau gift-nya beda (lihat catatan
-    // di GIFT_CATALOG soal 2 gift 🎂 yang sebenarnya beda wujud).
+    // di GIFT_CATALOG soal pasangan 🎂 yang sempat tertukar).
     if (g.sticker?.file_id) {
       await sendSticker(chatId, g.sticker.file_id, env);
     }
