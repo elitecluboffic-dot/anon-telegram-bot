@@ -1147,13 +1147,29 @@ async function handleListGifts(chatId, env) {
 
   await sendMessage(chatId, `🎁 Ditemukan ${data.result.gifts.length} gift. Mengirim satu per satu beserta stikernya...`, env);
 
+  // DEBUG: tampilkan mentahan gift pertama biar kelihatan field apa aja yang
+  // sebenernya dikembalikan Telegram (membantu kalau nama field beda dari dugaan).
+  if (data.result.gifts[0]) {
+    const rawPreview = JSON.stringify(data.result.gifts[0], null, 2).slice(0, 1200);
+    await sendMessage(chatId, `🔍 DEBUG - struktur gift pertama dari API:\n\n${rawPreview}`, env);
+  }
+
   for (const g of data.result.gifts) {
     const limited = g.total_count ? ` (limited: ${g.remaining_count ?? "?"}/${g.total_count})` : "";
     const caption = `ID: ${g.id} — ${g.star_count} Stars${limited}`;
 
     // Kirim wujud visual gift-nya dulu (kalau field sticker ada)
     if (g.sticker?.file_id) {
-      await sendSticker(chatId, g.sticker.file_id, env);
+      const stickerResult = await sendSticker(chatId, g.sticker.file_id, env);
+      if (!stickerResult?.ok) {
+        await sendMessage(
+          chatId,
+          `⚠️ Gagal kirim stiker gift ID ${g.id}. Error dari Telegram: ${stickerResult?.description || "(tidak ada deskripsi, cek koneksi/response)"}`,
+          env
+        );
+      }
+    } else {
+      await sendMessage(chatId, `⚠️ Gift ID ${g.id} tidak punya field "sticker.file_id" di response API.`, env);
     }
     // Baru info ID & harga sebagai teks (sendSticker gak support caption)
     await sendMessage(chatId, caption, env);
