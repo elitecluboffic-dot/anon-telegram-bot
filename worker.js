@@ -852,19 +852,22 @@ function isPremiumActive(profile) {
  * Tambah/ubah item di sini kalau mau custom katalognya.
  */
 const GIFT_CATALOG = [
-  // telegramGiftId & realPrice: isi manual pakai hasil /listgifts kalau mau item ini
-  // dikirim sebagai gift ASLI Telegram (bukan cuma notif fake). Biarin null kalau
-  // mau tetep pakai mode lama (fake notif doang, gak ada gift asli terkirim).
-  { id: "heart", emoji: "💝", label: "Hati & Pita", price: 45, telegramGiftId: null, realPrice: null },
-  { id: "box", emoji: "🎁", label: "Kado", price: 75, telegramGiftId: null, realPrice: null },
-  { id: "rose", emoji: "🌹", label: "Mawar", price: 75, telegramGiftId: null, realPrice: null },
-  { id: "cake", emoji: "🎂", label: "Kue Ulang Tahun", price: 150, telegramGiftId: null, realPrice: null },
-  { id: "bouquet", emoji: "💐", label: "Buket Bunga", price: 150, telegramGiftId: null, realPrice: null },
-  { id: "rocket", emoji: "🚀", label: "Roket", price: 150, telegramGiftId: null, realPrice: null },
-  { id: "champagne", emoji: "🍾", label: "Sampanye", price: 150, telegramGiftId: null, realPrice: null },
-  { id: "trophy", emoji: "🏆", label: "Piala", price: 300, telegramGiftId: null, realPrice: null },
-  { id: "ring", emoji: "💍", label: "Cincin", price: 300, telegramGiftId: null, realPrice: null },
-  { id: "diamond", emoji: "💎", label: "Berlian", price: 300, telegramGiftId: null, realPrice: null },
+  // telegramGiftId & realPrice diisi dari hasil /listgifts (dicocokkan lewat emoji
+  // bawaan tiap gift). price = harga jual ke pembeli (sesuai daftar harga terbaru).
+  //
+  // Catatan: ada 2 gift dengan emoji 🎂 dari /listgifts (ID 6046178578163303744 dan
+  // ID 5170144170496491616, sama-sama 50 Stars). Yang dipakai di sini cuma yang
+  // pertama; ID keduanya belum dipetakan ke item manapun.
+  { id: "heart", emoji: "💝", label: "Hati & Pita", price: 45, telegramGiftId: "5170145012310081615", realPrice: 15 },
+  { id: "box", emoji: "🎁", label: "Kado", price: 75, telegramGiftId: "5170250947678437525", realPrice: 25 },
+  { id: "rose", emoji: "🌹", label: "Mawar", price: 75, telegramGiftId: "5168103777563050263", realPrice: 25 },
+  { id: "cake", emoji: "🎂", label: "Kue Ulang Tahun", price: 150, telegramGiftId: "6046178578163303744", realPrice: 50 },
+  { id: "bouquet", emoji: "💐", label: "Buket Bunga", price: 150, telegramGiftId: "5170314324215857265", realPrice: 50 },
+  { id: "rocket", emoji: "🚀", label: "Roket", price: 150, telegramGiftId: "5170564780938756245", realPrice: 50 },
+  { id: "champagne", emoji: "🍾", label: "Sampanye", price: 150, telegramGiftId: "6028601630662853006", realPrice: 50 },
+  { id: "trophy", emoji: "🏆", label: "Piala", price: 350, telegramGiftId: "5168043875654172773", realPrice: 100 },
+  { id: "ring", emoji: "💍", label: "Cincin", price: 350, telegramGiftId: "5170690322832818290", realPrice: 100 },
+  { id: "diamond", emoji: "💎", label: "Berlian", price: 350, telegramGiftId: "5170521118301225164", realPrice: 100 },
 ];
 
 function giftById(id) {
